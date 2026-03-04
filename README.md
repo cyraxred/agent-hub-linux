@@ -35,16 +35,11 @@ The following AgentHub features have been rebuilt for Linux:
 
 ### New Features in This Project
 
-- **Cross-platform architecture** — Python/React stack runs on any Linux distribution
-- **WebSocket-first communication** — bidirectional real-time updates between backend and frontend via discriminated union messages
-- **Pydantic type generation** — shared type definitions auto-generated from Python models to TypeScript, ensuring type safety across the stack
-- **Async Python backend** — fully async FastAPI with SQLAlchemy, aiosqlite, and uvicorn
-- **Context window visualization** — token budget bar showing input/output/cache usage
+- **Linux** — Python/React stack runs on any Linux distribution
+- **Offline session review** — features like plans, diagrams, history and stats work without active monitoring. Active monitoring is only needed for real-time status updates and embedded terminal control.
 - **Session history browser** — paginated raw JSONL viewer (newest-first)
-- **Approval timeout detection** — tracks pending tool approvals with timeout handling
-- **Token cache awareness** — separately tracks prompt cache reads and creations
+- **Approval attention detection** — tracks pending tool approvals and required inputs for non-monitored sessions
 - **Headless mode** — runs as API-only server when no GUI is available
-- **System tray integration** — optional pystray support for background operation
 
 ## Tech Stack
 
