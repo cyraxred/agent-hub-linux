@@ -60,6 +60,15 @@ export interface ActivityEntry {
   tool_input?: CodeChangeInput | null;
 }
 
+export interface AttentionNotification {
+  id: string;
+  session_id: string;
+  attention_kind: "awaiting_approval" | "awaiting_question";
+  tool_name?: string;
+  timestamp: string;
+  resolved?: boolean;
+}
+
 export interface CLILoadingStateAddingRepository {
   kind: "adding_repository";
   name: string;
@@ -350,6 +359,22 @@ export interface ServerMessageError {
   message: string;
 }
 
+export interface ServerMessageNotification {
+  kind: "notification";
+  notification: AttentionNotification;
+}
+
+export interface ServerMessageNotificationList {
+  kind: "notification_list";
+  notifications?: AttentionNotification[];
+}
+
+export interface ServerMessageNotificationResolved {
+  kind: "notification_resolved";
+  notification_id: string;
+  session_id: string;
+}
+
 export interface SessionSearchResult {
   id: string;
   slug?: string;
@@ -366,6 +391,19 @@ export interface SessionSearchResult {
 export interface ServerMessageSearchResults {
   kind: "search_results";
   results?: SessionSearchResult[];
+}
+
+export interface SessionHistoryEntry {
+  line: number;
+  type: string;
+  data: Record<string, unknown>;
+}
+
+export interface ServerMessageSessionHistoryAppend {
+  kind: "session_history_append";
+  session_id: string;
+  entries: SessionHistoryEntry[];
+  total_lines: number;
 }
 
 export interface SessionMonitorState {
@@ -415,19 +453,6 @@ export interface SessionStatusThinking {
 
 export interface SessionStatusWaitingForUser {
   kind: "waiting_for_user";
-}
-
-export interface SessionHistoryEntry {
-  line: number;
-  type: string;
-  data: Record<string, unknown>;
-}
-
-export interface ServerMessageSessionHistoryAppend {
-  kind: "session_history_append";
-  session_id: string;
-  entries: SessionHistoryEntry[];
-  total_lines: number;
 }
 
 export interface ServerMessageSessionStateUpdate {
@@ -527,6 +552,9 @@ export type ServerMessage =
   | ServerMessageSearchResults
   | ServerMessageTerminalOutput
   | ServerMessageSessionHistoryAppend
+  | ServerMessageNotification
+  | ServerMessageNotificationResolved
+  | ServerMessageNotificationList
   | ServerMessageError;
 
 export type SessionStatus =

@@ -44,11 +44,22 @@ async def send_notification(
         logger.debug("Failed to send notification", exc_info=True)
 
 
-async def notify_approval_needed(session_id: str, tool_name: str) -> None:
-    """Send a notification that a session needs tool approval."""
+async def notify_attention_needed(
+    session_id: str,
+    attention_kind: str,
+    tool_name: str = "",
+) -> None:
+    """Send a desktop notification that a session needs attention."""
+    if attention_kind == "awaiting_question":
+        title = "Input Needed"
+        body = f"Session {session_id[:8]} is waiting for your answer"
+    else:
+        title = "Approval Needed"
+        body = f"Session {session_id[:8]} needs approval for {tool_name}"
+
     await send_notification(
-        title="Approval Needed",
-        body=f"Session {session_id[:8]} needs approval for {tool_name}",
+        title=title,
+        body=body,
         urgency="critical",
         icon="dialog-warning",
     )

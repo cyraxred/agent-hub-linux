@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -123,18 +124,46 @@ def _make_key(session_id: str | None, project_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def _write_prompt_deferred(fd: int, prompt: str, delay: float = 3.0) -> None:
+    """Write a prompt to a PTY after a delay, allowing the CLI to become ready."""
+    await asyncio.sleep(delay)
+    try:
+        os.write(fd, (prompt + "\n").encode("utf-8"))
+    except OSError:
+        logger.debug("Failed to write deferred prompt to fd %d", fd)
+
+
 @router.post("/launch", response_model=TerminalLaunchResponse)
 async def launch_terminal(
     body: TerminalLaunchRequest,
     request: Request,
 ) -> TerminalLaunchResponse:
-    """Launch a new terminal with a PTY.
+    """Launch a new terminal with a PTY, or reuse an existing one.
 
-    Spawns the requested CLI command (e.g. ``claude``, ``codex``) inside
-    a pseudo-terminal. The returned ``key`` and ``fd`` can be used by
-    the WebSocket terminal handler to bridge xterm.js.
+    If a terminal for the same session already exists, it is reused.
+    When a ``prompt`` is provided, it is written to the PTY stdin
+    (after a short delay for new terminals, immediately for existing ones)
+    rather than passed as a CLI argument, so Claude receives it as user input.
     """
     registry = _get_registry(request)
+    key = _make_key(body.session_id, body.project_path)
+
+    # Check for an existing terminal
+    existing = registry.get(key)
+    if existing is not None:
+        # Terminal already running — send prompt as stdin if provided
+        if body.prompt:
+            try:
+                os.write(existing.fd, (body.prompt + "\n").encode("utf-8"))
+            except OSError:
+                logger.debug("Failed to write prompt to existing terminal %s", key)
+        return TerminalLaunchResponse(
+            key=key,
+            pid=existing.pid,
+            fd=existing.fd,
+            session_id=existing.session_id,
+            project_path=existing.project_path,
+        )
 
     # Resolve the CLI command
     try:
@@ -152,11 +181,11 @@ async def launch_terminal(
 
     cwd = body.project_path if body.project_path and Path(body.project_path).is_dir() else None
 
+    # Don't pass prompt as CLI arg — we'll write it to stdin after Claude is ready
     args = build_cli_args(
         cli_path,
         session_id=body.session_id,
         resume=body.resume,
-        prompt=body.prompt,
     )
 
     try:
@@ -171,8 +200,11 @@ async def launch_terminal(
     proc.session_id = body.session_id
     proc.project_path = body.project_path
 
-    key = _make_key(body.session_id, body.project_path)
     registry.register(key, proc)
+
+    # Write prompt to stdin after delay so Claude has time to start
+    if body.prompt:
+        asyncio.create_task(_write_prompt_deferred(proc.fd, body.prompt))
 
     return TerminalLaunchResponse(
         key=key,

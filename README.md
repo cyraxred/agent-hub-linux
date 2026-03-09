@@ -29,9 +29,7 @@ The following AgentHub features have been rebuilt for Linux:
 
 - Multiple layout modes (single, list, 2-column, 3-column grid)
 - Custom YAML themes with hot-reload
-- Notification sounds for tool call approvals
-- Web preview with auto-detection and live-reload
-- Direct feedback to Claude from diff view
+- Notification sounds (desktop notifications via notify-send are implemented, but no audio alerts yet)
 
 ### New Features in This Project
 

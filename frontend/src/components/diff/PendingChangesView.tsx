@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useGitStore } from '@/store/git';
 import { api } from '@/api/client';
 import { DiffCommentsPanel } from './DiffCommentsPanel';
@@ -6,9 +6,11 @@ import type { DiffComment } from '@/types/generated';
 
 interface PendingChangesViewProps {
   repoPath: string;
+  sessionId?: string | null;
+  onTerminalLaunched?: () => void;
 }
 
-export const PendingChangesView: React.FC<PendingChangesViewProps> = ({ repoPath }) => {
+export const PendingChangesView: React.FC<PendingChangesViewProps> = ({ repoPath, sessionId, onTerminalLaunched }) => {
   const {
     files,
     comments,
@@ -23,6 +25,8 @@ export const PendingChangesView: React.FC<PendingChangesViewProps> = ({ repoPath
 
   const [unifiedDiff, setUnifiedDiff] = useState<string>('');
   const [diffLoading, setDiffLoading] = useState(false);
+  const [commentLineNumber, setCommentLineNumber] = useState('');
+  const diffContentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetchDiff(repoPath, diffMode);
@@ -54,6 +58,23 @@ export const PendingChangesView: React.FC<PendingChangesViewProps> = ({ repoPath
 
   const handleAddComment = (comment: DiffComment) => {
     addComment(comment);
+  };
+
+  const handleDiffLineClick = (lineNum: number | null) => {
+    if (lineNum != null) {
+      setCommentLineNumber(String(lineNum));
+    }
+  };
+
+  const handleScrollToLine = (lineNum: number) => {
+    const container = diffContentRef.current;
+    if (!container) return;
+    const row = container.querySelector(`tr[data-line-new="${lineNum}"], tr[data-line-old="${lineNum}"]`);
+    if (row) {
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      row.classList.add('diff-line-highlight');
+      setTimeout(() => row.classList.remove('diff-line-highlight'), 1500);
+    }
   };
 
   if (loading) {
@@ -132,9 +153,9 @@ export const PendingChangesView: React.FC<PendingChangesViewProps> = ({ repoPath
         </div>
 
         {/* Right: selected file diff + comments */}
-        <div className="changes-detail">
-          {selectedFile ? (
-            <>
+        <div className="changes-detail-wrapper">
+          <div className="changes-detail">
+            {selectedFile ? (
               <div className="diff-view">
                 <div className="diff-file-header">
                   <div className="diff-file-info">
@@ -157,7 +178,7 @@ export const PendingChangesView: React.FC<PendingChangesViewProps> = ({ repoPath
                     })()}
                   </div>
                 </div>
-                <div className="diff-content">
+                <div className="diff-content" ref={diffContentRef}>
                   {diffLoading ? (
                     <div style={{ padding: 'var(--space-lg)', textAlign: 'center' }}>
                       <div className="spinner" />
@@ -166,7 +187,14 @@ export const PendingChangesView: React.FC<PendingChangesViewProps> = ({ repoPath
                     <table className="diff-table">
                       <tbody>
                         {parseDiffLines(unifiedDiff).map((line, i) => (
-                          <tr key={i} className={`diff-line diff-line-${line.type}`}>
+                          <tr
+                            key={i}
+                            className={`diff-line diff-line-${line.type}`}
+                            data-line-new={line.newNum ?? undefined}
+                            data-line-old={line.oldNum ?? undefined}
+                            onClick={() => handleDiffLineClick(line.newNum ?? line.oldNum)}
+                            style={{ cursor: 'pointer' }}
+                          >
                             <td className="diff-line-num old">{line.oldNum ?? ''}</td>
                             <td className="diff-line-num new">{line.newNum ?? ''}</td>
                             <td className="diff-line-prefix">{line.prefix}</td>
@@ -180,16 +208,23 @@ export const PendingChangesView: React.FC<PendingChangesViewProps> = ({ repoPath
                   )}
                 </div>
               </div>
-              <DiffCommentsPanel
-                comments={comments}
-                filePath={selectedFile}
-                onAddComment={handleAddComment}
-              />
-            </>
-          ) : (
-            <div className="changes-detail-empty">
-              <p>Select a file to view changes</p>
-            </div>
+            ) : (
+              <div className="changes-detail-empty">
+                <p>Select a file to view changes</p>
+              </div>
+            )}
+          </div>
+          {selectedFile && (
+            <DiffCommentsPanel
+              comments={comments}
+              filePath={selectedFile}
+              onAddComment={handleAddComment}
+              sessionId={sessionId}
+              onTerminalLaunched={onTerminalLaunched}
+              lineNumber={commentLineNumber}
+              onLineNumberChange={setCommentLineNumber}
+              onScrollToLine={handleScrollToLine}
+            />
           )}
         </div>
       </div>

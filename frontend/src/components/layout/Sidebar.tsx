@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
+import { useNotificationsStore } from '@/store/notifications';
 import { RepositoryTreeView } from '@/components/sessions/RepositoryTreeView';
 import { ProviderSegmentedControl } from '@/components/sessions/ProviderSegmentedControl';
 import type { CLISession } from '@/types/generated';
@@ -38,6 +39,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
   const selectSession = useSessionsStore((s) => s.selectSession);
   const addRepository = useSessionsStore((s) => s.addRepository);
   const { settings, updateSettings, saveSettings } = useSettingsStore();
+  const notifications = useNotificationsStore((s) => s.notifications);
   const approvalTimeout = (settings.approval_timeout_seconds as number) ?? 10;
 
   const [showAddRepo, setShowAddRepo] = useState(false);
@@ -96,6 +98,41 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
 
   return (
     <aside className="sidebar">
+      {notifications.length > 0 && (
+        <div className="sidebar-section sidebar-attention">
+          <div className="sidebar-section-header">
+            <h3>Attention</h3>
+            <span className="badge badge-warning">{notifications.length}</span>
+          </div>
+          <div className="sidebar-attention-list">
+            {notifications.map((notif) => (
+              <button
+                key={notif.id}
+                className={`sidebar-attention-item ${
+                  selectedSessionId === notif.session_id ? 'active' : ''
+                }`}
+                onClick={() => selectSession(notif.session_id)}
+                title={
+                  notif.attention_kind === 'awaiting_question'
+                    ? 'Waiting for your answer'
+                    : `Needs approval for ${notif.tool_name}`
+                }
+              >
+                <span className={`status-dot status-${notif.attention_kind}`} />
+                <span className="attention-session-id">
+                  {notif.session_id.slice(0, 12)}
+                </span>
+                <span className="attention-detail">
+                  {notif.attention_kind === 'awaiting_question'
+                    ? 'Input needed'
+                    : notif.tool_name || 'Approval'}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="sidebar-section">
         <div className="sidebar-section-header">
           <h3>Repositories</h3>

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { SelectedRepository, SessionMonitorState, SessionHistoryEntry } from '@/types/generated';
 import { api } from '@/api/client';
+import { useNotificationsStore } from '@/store/notifications';
 
 type Provider = string;
 
@@ -35,6 +36,8 @@ interface SessionsState {
   sessionStates: Record<string, SessionMonitorState>;
   /** Session IDs currently being monitored. */
   monitoredSessionIds: Set<string>;
+  /** Subscription info for monitored sessions (session_id -> {projectPath, sessionFilePath}). */
+  monitoredSessionInfo: Record<string, { projectPath: string; sessionFilePath: string }>;
 
   selectedSessionId: string | null;
   selectedRepositoryPath: string | null;
@@ -76,6 +79,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   repositories: [],
   sessionStates: {},
   monitoredSessionIds: new Set(),
+  monitoredSessionInfo: {},
   selectedSessionId: null,
   selectedRepositoryPath: null,
   activeProvider: 'claude',
@@ -88,6 +92,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     try {
       const repositories = await api.repositories.list(provider ?? get().activeProvider);
       set({ repositories, loading: false });
+      useNotificationsStore.getState().syncFromRepositories(repositories);
     } catch (err) {
       set({ error: (err as Error).message, loading: false });
     }
@@ -150,7 +155,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         ids.add(sessionId);
         const states = { ...s.sessionStates };
         if (resp.state) states[sessionId] = resp.state;
-        return { monitoredSessionIds: ids, sessionStates: states };
+        const info = { ...s.monitoredSessionInfo };
+        info[sessionId] = { projectPath, sessionFilePath: sessionFilePath ?? '' };
+        return { monitoredSessionIds: ids, sessionStates: states, monitoredSessionInfo: info };
       });
     } catch (err) {
       set({ error: (err as Error).message });
@@ -164,8 +171,10 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       set((s) => {
         const ids = new Set(s.monitoredSessionIds);
         ids.delete(sessionId);
+        const info = { ...s.monitoredSessionInfo };
+        delete info[sessionId];
         // Keep sessionStates[sessionId] so the UI retains last-known state
-        return { monitoredSessionIds: ids };
+        return { monitoredSessionIds: ids, monitoredSessionInfo: info };
       });
     } catch (err) {
       set({ error: (err as Error).message });
@@ -215,5 +224,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     }));
   },
 
-  setRepositories: (repos) => set({ repositories: repos }),
+  setRepositories: (repos) => {
+    set({ repositories: repos });
+    useNotificationsStore.getState().syncFromRepositories(repos);
+  },
 }));

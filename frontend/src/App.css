@@ -1505,9 +1505,18 @@
 .changes-file-item:hover { background: var(--bg-hover); }
 .changes-file-item.selected { background: rgba(88, 166, 255, 0.08); border-left: 2px solid var(--accent-blue); }
 
+.changes-detail-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
 .changes-detail {
   flex: 1;
   overflow: auto;
+  min-height: 0;
 }
 
 .changes-detail-empty {
@@ -1648,23 +1657,50 @@
 }
 .diff-line-del .diff-line-prefix { color: var(--accent-red); }
 
+.diff-line:hover { background: rgba(88, 166, 255, 0.06); }
+
+.diff-line-highlight {
+  animation: diff-highlight-flash 1.5s ease-out;
+}
+
+@keyframes diff-highlight-flash {
+  0% { background: rgba(88, 166, 255, 0.25); }
+  100% { background: transparent; }
+}
 
 /* ── Diff Comments ─────────────────────────────────── */
 
 .diff-comments-panel {
-  margin-top: var(--space-lg);
+  flex-shrink: 0;
   background: var(--bg-secondary);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
+  border-top: 1px solid var(--border-default);
   overflow: hidden;
+  max-height: 50%;
+  display: flex;
+  flex-direction: column;
+}
+
+.diff-comments-panel.collapsed {
+  max-height: none;
 }
 
 .diff-comments-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: var(--space-md) var(--space-lg);
+  padding: var(--space-sm) var(--space-lg);
   border-bottom: 1px solid var(--border-muted);
+  user-select: none;
+}
+
+.diff-comments-panel.collapsed .diff-comments-header {
+  border-bottom: none;
+}
+
+.diff-comments-list {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .diff-comments-header h4 {
@@ -1679,8 +1715,6 @@
   padding: 1px 6px;
   border-radius: 8px;
 }
-
-.diff-comments-list { padding: var(--space-md); }
 
 .comments-empty {
   padding: var(--space-md);

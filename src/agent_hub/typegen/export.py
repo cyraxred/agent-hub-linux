@@ -169,7 +169,11 @@ def _json_schema_type_to_ts(
     if json_type == "object":
         # additionalProperties gives us Record<string, V>
         additional = prop.get("additionalProperties")
-        if additional:
+        if additional is True:
+            # Open object with no value schema constraint
+            ts = "Record<string, unknown>"
+            return f"{ts} | null" if nullable else ts
+        if isinstance(additional, dict):
             val_ts = _json_schema_type_to_ts(additional, defs)
             ts = f"Record<string, {val_ts}>"
             return f"{ts} | null" if nullable else ts

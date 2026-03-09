@@ -105,7 +105,13 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
         );
 
       case 'changes':
-        return <PendingChangesView repoPath={selectedSession.project_path} />;
+        return (
+          <PendingChangesView
+            repoPath={selectedSession.project_path}
+            sessionId={selectedSession.id}
+            onTerminalLaunched={() => onChangeView?.('terminal')}
+          />
+        );
 
       case 'plan':
         return <PlanView sessionId={selectedSession.id} />;

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { wsClient, type SubscriptionInfo } from '@/api/websocket';
 import { useSessionsStore } from '@/store/sessions';
 import { useStatsStore } from '@/store/stats';
+import { useNotificationsStore } from '@/store/notifications';
 import { historyAppendBus } from '@/store/sessions';
 import type { ServerMessage } from '@/types/generated';
 
@@ -10,14 +11,24 @@ export function useWebSocket() {
   const setSessionState = useSessionsStore((s) => s.setSessionState);
   const setRepositories = useSessionsStore((s) => s.setRepositories);
   const setStats = useStatsStore((s) => s.setStats);
+  const addNotification = useNotificationsStore((s) => s.addNotification);
+  const resolveNotification = useNotificationsStore((s) => s.resolveNotification);
+  const resolveBySessionId = useNotificationsStore((s) => s.resolveBySessionId);
+  const setNotifications = useNotificationsStore((s) => s.setNotifications);
   const initialized = useRef(false);
 
   const handleMessage = useCallback(
     (message: ServerMessage) => {
       switch (message.kind) {
-        case 'session_state_update':
+        case 'session_state_update': {
           setSessionState(message.session_id, message.state);
+          // Auto-resolve notifications when session leaves attention state
+          const statusKind = message.state?.status?.kind;
+          if (statusKind && statusKind !== 'awaiting_approval' && statusKind !== 'awaiting_question') {
+            resolveBySessionId(message.session_id);
+          }
           break;
+        }
         case 'sessions_updated':
           setRepositories(message.repositories ?? []);
           break;
@@ -37,6 +48,15 @@ export function useWebSocket() {
         case 'search_results':
           // Handled by search store if needed
           break;
+        case 'notification':
+          addNotification(message.notification);
+          break;
+        case 'notification_resolved':
+          resolveNotification(message.notification_id);
+          break;
+        case 'notification_list':
+          setNotifications(message.notifications ?? []);
+          break;
         case 'error':
           console.error('[WS] Server error:', message.message);
           break;
@@ -44,7 +64,7 @@ export function useWebSocket() {
           break;
       }
     },
-    [setSessionState, setRepositories, setStats],
+    [setSessionState, setRepositories, setStats, addNotification, resolveNotification, resolveBySessionId, setNotifications],
   );
 
   useEffect(() => {

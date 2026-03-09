@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -19,6 +21,7 @@ from agent_hub.models.search import SessionSearchResult
 from agent_hub.models.session import SelectedRepository
 from agent_hub.models.stats import GlobalStatsCache
 from agent_hub.models.ws_messages import (
+    AttentionNotification,
     ClientMessage,
     ClientMessageRefreshSessions,
     ClientMessageSubscribeSession,
@@ -27,6 +30,9 @@ from agent_hub.models.ws_messages import (
     ClientMessageUnsubscribeSession,
     SessionHistoryEntry,
     ServerMessageError,
+    ServerMessageNotification,
+    ServerMessageNotificationList,
+    ServerMessageNotificationResolved,
     ServerMessageSearchResults,
     ServerMessageSessionHistoryAppend,
     ServerMessageSessionsUpdated,
@@ -34,6 +40,7 @@ from agent_hub.models.ws_messages import (
     ServerMessageStatsUpdated,
     ServerMessageTerminalOutput,
 )
+from agent_hub.services.notification_service import notify_attention_needed
 from agent_hub.services.terminal_launcher import resize_terminal
 
 logger = logging.getLogger(__name__)
@@ -48,6 +55,11 @@ class ConnectionManager:
         # Per-connection session subscriptions: ws -> set of session_ids
         self._subscriptions: dict[int, set[str]] = {}
         self._lock = asyncio.Lock()
+        # Notification tracking
+        self._notifications: dict[str, AttentionNotification] = {}
+        self._previous_status: dict[str, str] = {}  # session_id -> last status kind
+        # Map session_id -> active notification id (for resolving)
+        self._session_notification: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -197,6 +209,80 @@ class ConnectionManager:
         msg = ServerMessageError(message=message)
         await self._safe_send(ws, msg.model_dump(mode="json"))
 
+    # ------------------------------------------------------------------
+    # Notification helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def active_notifications(self) -> list[AttentionNotification]:
+        """Return all unresolved notifications."""
+        return [n for n in self._notifications.values() if not n.resolved]
+
+    async def _check_attention_transition(
+        self, session_id: str, state: SessionMonitorState,
+        *, send_desktop: bool = True,
+    ) -> None:
+        """Detect attention state transitions and create/resolve notifications."""
+        current_kind = state.status.kind if state.status else "idle"
+        previous_kind = self._previous_status.get(session_id)
+        self._previous_status[session_id] = current_kind
+
+        attention_kinds = {"awaiting_approval", "awaiting_question"}
+
+        # Skip if this is the first update and not in attention state
+        # (avoids spurious transition from unknown → non-attention)
+        if previous_kind is None and current_kind not in attention_kinds:
+            return
+
+        # Already have an active notification for this session — no duplicate
+        if current_kind in attention_kinds and session_id in self._session_notification:
+            return
+
+        # Transition INTO attention state
+        if current_kind in attention_kinds:
+            tool_name = ""
+            if hasattr(state.status, "tool"):
+                tool_name = state.status.tool  # type: ignore[union-attr]
+
+            notif_id = str(uuid.uuid4())
+            notification = AttentionNotification(
+                id=notif_id,
+                session_id=session_id,
+                attention_kind=current_kind,  # type: ignore[arg-type]
+                tool_name=tool_name,
+                timestamp=datetime.now(tz=timezone.utc),
+            )
+            self._notifications[notif_id] = notification
+            self._session_notification[session_id] = notif_id
+
+            # Broadcast to all clients
+            msg = ServerMessageNotification(notification=notification)
+            await self.broadcast(msg.model_dump(mode="json"))
+
+            # Desktop notification (fire-and-forget)
+            if send_desktop:
+                asyncio.create_task(
+                    notify_attention_needed(session_id, current_kind, tool_name)
+                )
+
+        # Transition OUT of attention state
+        elif current_kind not in attention_kinds and previous_kind in attention_kinds:
+            notif_id = self._session_notification.pop(session_id, None)
+            if notif_id and notif_id in self._notifications:
+                self._notifications.pop(notif_id)
+                msg = ServerMessageNotificationResolved(
+                    notification_id=notif_id,
+                    session_id=session_id,
+                )
+                await self.broadcast(msg.model_dump(mode="json"))
+
+    async def send_notification_list(self, ws: WebSocket) -> None:
+        """Send the current notification list to a newly connected client."""
+        msg = ServerMessageNotificationList(
+            notifications=self.active_notifications,
+        )
+        await self._safe_send(ws, msg.model_dump(mode="json"))
+
 
 # ---------------------------------------------------------------------------
 # Singleton manager
@@ -214,6 +300,7 @@ async def _on_session_state_update(
     session_id: str, state: SessionMonitorState
 ) -> None:
     """Callback invoked by file watchers when a session state changes."""
+    await manager._check_attention_transition(session_id, state)
     await manager.broadcast_session_state(session_id, state)
 
 
@@ -272,6 +359,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     """
     provider = ws.app.state.provider
     await manager.connect(ws)
+    await manager.send_notification_list(ws)
 
     try:
         while True:

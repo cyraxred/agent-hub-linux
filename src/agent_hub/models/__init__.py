@@ -66,7 +66,10 @@ from agent_hub.models.search import (
 
 # ws_messages.py
 from agent_hub.models.ws_messages import (
+    AttentionNotification,
     ClientMessage,
+    SessionHistoryEntry,
+    ServerMessageSessionHistoryAppend,
     ClientMessageRefreshSessions,
     ClientMessageSubscribeSession,
     ClientMessageTerminalInput,
@@ -74,6 +77,9 @@ from agent_hub.models.ws_messages import (
     ClientMessageUnsubscribeSession,
     ServerMessage,
     ServerMessageError,
+    ServerMessageNotification,
+    ServerMessageNotificationList,
+    ServerMessageNotificationResolved,
     ServerMessageSearchResults,
     ServerMessageSessionsUpdated,
     ServerMessageSessionStateUpdate,
@@ -189,6 +195,7 @@ __all__ = [
     "SessionIndexEntry",
     "SessionSearchResult",
     # ws_messages
+    "AttentionNotification",
     "ClientMessage",
     "ClientMessageRefreshSessions",
     "ClientMessageSubscribeSession",
@@ -196,7 +203,12 @@ __all__ = [
     "ClientMessageTerminalResize",
     "ClientMessageUnsubscribeSession",
     "ServerMessage",
+    "SessionHistoryEntry",
     "ServerMessageError",
+    "ServerMessageSessionHistoryAppend",
+    "ServerMessageNotification",
+    "ServerMessageNotificationList",
+    "ServerMessageNotificationResolved",
     "ServerMessageSearchResults",
     "ServerMessageSessionsUpdated",
     "ServerMessageSessionStateUpdate",

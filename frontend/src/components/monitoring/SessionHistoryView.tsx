@@ -19,6 +19,8 @@ const TYPE_COLORS: Record<string, string> = {
   system: 'var(--accent-purple)',
   user: 'var(--accent-blue)',
   assistant: 'var(--accent-green)',
+  tool_use: 'var(--accent-cyan, var(--accent-blue))',
+  tool_result: 'var(--accent-orange)',
   progress: 'var(--accent-yellow)',
   summary: 'var(--accent-orange)',
   'file-history-snapshot': 'var(--text-tertiary)',
@@ -142,7 +144,8 @@ export const SessionHistoryView: React.FC<SessionHistoryViewProps> = ({ sessionI
       <div className="history-entries">
         {filtered.map((entry) => {
           const isExpanded = expandedLines.has(entry.line);
-          const color = TYPE_COLORS[entry.type] ?? 'var(--text-secondary)';
+          const displayType = getDisplayType(entry.type, entry.data);
+          const color = TYPE_COLORS[displayType] ?? TYPE_COLORS[entry.type] ?? 'var(--text-secondary)';
 
           return (
             <div key={entry.line} className="history-entry">
@@ -158,7 +161,7 @@ export const SessionHistoryView: React.FC<SessionHistoryViewProps> = ({ sessionI
                   className="history-type-badge"
                   style={{ color }}
                 >
-                  {entry.type}
+                  {displayType}
                 </span>
                 <span className="history-preview">
                   {getPreview(entry.data)}
@@ -200,34 +203,48 @@ export const SessionHistoryView: React.FC<SessionHistoryViewProps> = ({ sessionI
   );
 };
 
+/** Determine a more specific display type for the entry (e.g. tool_use, tool_result). */
+function getDisplayType(entryType: string, data: Record<string, unknown>): string {
+  const msg = data.message as Record<string, unknown> | undefined;
+  if (!msg) return entryType;
+  const content = msg.content;
+  if (!Array.isArray(content)) return entryType;
+
+  // Check first content block for tool_use / tool_result
+  for (const block of content) {
+    if (typeof block === 'object' && block !== null) {
+      const b = block as Record<string, unknown>;
+      if (b.type === 'tool_use') return 'tool_use';
+      if (b.type === 'tool_result') return 'tool_result';
+    }
+  }
+  return entryType;
+}
+
 function getPreview(data: Record<string, unknown>): string {
-  // Show a short preview based on entry type
   const msg = data.message as Record<string, unknown> | undefined;
   if (msg) {
-    const role = msg.role as string | undefined;
     const content = msg.content;
-    if (role) {
-      if (typeof content === 'string') {
-        return `${role}: ${content.slice(0, 80)}`;
-      }
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (typeof block === 'object' && block !== null) {
-            const b = block as Record<string, unknown>;
-            if (b.type === 'text' && typeof b.text === 'string') {
-              return `${role}: ${b.text.slice(0, 80)}`;
-            }
-            if (b.type === 'tool_use') {
-              return `${role}: tool_use(${b.name})`;
-            }
-            if (b.type === 'tool_result') {
-              return `${role}: tool_result`;
-            }
+    if (typeof content === 'string') {
+      return content.slice(0, 80);
+    }
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (typeof block === 'object' && block !== null) {
+          const b = block as Record<string, unknown>;
+          if (b.type === 'text' && typeof b.text === 'string') {
+            return b.text.slice(0, 80);
+          }
+          if (b.type === 'tool_use') {
+            const id = String(b.id ?? '');
+            return id ? `${b.name} [${id}]` : String(b.name ?? '');
+          }
+          if (b.type === 'tool_result') {
+            return String(b.tool_use_id ?? '');
           }
         }
-        return `${role}: [${content.length} blocks]`;
       }
-      return role;
+      return `[${content.length} blocks]`;
     }
   }
 

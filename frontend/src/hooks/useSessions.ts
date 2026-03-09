@@ -42,39 +42,28 @@ export function useSessions() {
     return () => clearInterval(interval);
   }, [refreshSessions]);
 
-  // Subscribe to selected session via WS when it is being monitored
+  const monitoredSessionInfo = useSessionsStore((s) => s.monitoredSessionInfo);
+
+  // Subscribe to selected session via WS when it is being monitored.
+  // Uses monitoredSessionInfo (stored at startMonitoring time) so this
+  // doesn't depend on repositories being populated — no race condition.
   useEffect(() => {
     if (!selectedSessionId || !connected) return;
     if (!monitoredSessionIds.has(selectedSessionId)) return;
 
-    // Find the session in the repo tree so we can pass project_path and session_file_path
-    let session: CLISession | undefined;
-    let projectPath: string | undefined;
+    const info = monitoredSessionInfo[selectedSessionId];
+    if (!info) return;
 
-    for (const repo of repositories) {
-      for (const wt of repo.worktrees ?? []) {
-        const found = wt.sessions?.find((s) => s.id === selectedSessionId);
-        if (found) {
-          session = found;
-          projectPath = wt.path || repo.path;
-          break;
-        }
-      }
-      if (session) break;
-    }
+    subscribe({
+      sessionId: selectedSessionId,
+      projectPath: info.projectPath,
+      sessionFilePath: info.sessionFilePath,
+    });
 
-    if (session && projectPath) {
-      subscribe({
-        sessionId: session.id,
-        projectPath,
-        sessionFilePath: session.session_file_path ?? '',
-      });
-
-      return () => {
-        unsubscribe(session!.id);
-      };
-    }
-  }, [selectedSessionId, connected, monitoredSessionIds, repositories, subscribe, unsubscribe]);
+    return () => {
+      unsubscribe(selectedSessionId);
+    };
+  }, [selectedSessionId, connected, monitoredSessionIds, monitoredSessionInfo, subscribe, unsubscribe]);
 
   // Compute: flatten all sessions from repos -> worktrees -> sessions
   const allSessions = useMemo(() => {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
@@ -10,6 +11,20 @@ from agent_hub.models.monitor_state import SessionMonitorState
 from agent_hub.models.search import SessionSearchResult
 from agent_hub.models.session import SelectedRepository
 from agent_hub.models.stats import GlobalStatsCache
+
+
+# --- Notification models ---
+
+
+class AttentionNotification(BaseModel, frozen=True):
+    """An in-memory notification for a session needing attention."""
+
+    id: str
+    session_id: str
+    attention_kind: Literal["awaiting_approval", "awaiting_question"]
+    tool_name: str = ""
+    timestamp: datetime
+    resolved: bool = False
 
 
 # --- ServerMessage discriminated union ---
@@ -53,6 +68,28 @@ class ServerMessageTerminalOutput(BaseModel, frozen=True):
     data: str
 
 
+class ServerMessageNotification(BaseModel, frozen=True):
+    """Server sends a new attention notification."""
+
+    kind: Literal["notification"] = "notification"
+    notification: AttentionNotification
+
+
+class ServerMessageNotificationResolved(BaseModel, frozen=True):
+    """Server notifies that a notification has been resolved."""
+
+    kind: Literal["notification_resolved"] = "notification_resolved"
+    notification_id: str
+    session_id: str
+
+
+class ServerMessageNotificationList(BaseModel, frozen=True):
+    """Server sends the full list of active notifications (on connect)."""
+
+    kind: Literal["notification_list"] = "notification_list"
+    notifications: list[AttentionNotification] = Field(default_factory=list)
+
+
 class ServerMessageError(BaseModel, frozen=True):
     """Server sends an error message."""
 
@@ -84,6 +121,9 @@ ServerMessage = Annotated[
     | ServerMessageSearchResults
     | ServerMessageTerminalOutput
     | ServerMessageSessionHistoryAppend
+    | ServerMessageNotification
+    | ServerMessageNotificationResolved
+    | ServerMessageNotificationList
     | ServerMessageError,
     Field(discriminator="kind"),
 ]
