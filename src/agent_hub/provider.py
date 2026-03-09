@@ -92,6 +92,7 @@ class AgentHubProvider:
         self._metadata_store: MetadataStore | None = None
         self._process_registry: ProcessRegistry | None = None
         self._dev_server_manager: DevServerManager | None = None
+        self._proxy_service: object | None = None  # ProxyService — imported lazily
 
     # ------------------------------------------------------------------
     # Read-only access to settings
@@ -207,6 +208,15 @@ class AgentHubProvider:
         return self._process_registry
 
     @property
+    def proxy_service(self) -> object:
+        """Return the :class:`~agent_hub.services.proxy_service.ProxyService` singleton."""
+        if self._proxy_service is None:
+            from agent_hub.services.proxy_service import ProxyService
+
+            self._proxy_service = ProxyService()
+        return self._proxy_service
+
+    @property
     def dev_server_manager(self) -> DevServerManager:
         if self._dev_server_manager is None:
             self._dev_server_manager = DevServerManager()
@@ -315,6 +325,13 @@ class AgentHubProvider:
         if self._process_registry is not None:
             self._process_registry.terminate_all()
             logger.debug("Process registry cleaned up")
+
+        # Proxy service (remote host connections)
+        if self._proxy_service is not None:
+            from agent_hub.services.proxy_service import ProxyService
+
+            await ProxyService.shutdown(self._proxy_service)  # type: ignore[arg-type]
+            logger.debug("ProxyService shut down")
 
         # Database
         if self._metadata_store is not None:

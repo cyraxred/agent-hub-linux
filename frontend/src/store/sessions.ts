@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import type { SelectedRepository, SessionMonitorState, SessionHistoryEntry } from '@/types/generated';
-import { api } from '@/api/client';
+import { api, createApiForHost } from '@/api/client';
 import { useNotificationsStore } from '@/store/notifications';
+import { LOCALHOST_HOST_ID } from '@/types/hosts';
 
 type Provider = string;
 
@@ -29,15 +30,22 @@ class HistoryAppendBus {
 
 export const historyAppendBus = new HistoryAppendBus();
 
+/** Repository annotated with which host it lives on. */
+export interface HostedRepository extends SelectedRepository {
+  host_id: string;
+}
+
 interface SessionsState {
-  /** Repository tree (repos → worktrees → sessions). */
-  repositories: SelectedRepository[];
+  /** Repository tree (repos → worktrees → sessions), annotated with host_id. */
+  repositories: HostedRepository[];
+  /** Per-host repository lists — merged into `repositories`. */
+  _reposByHost: Record<string, HostedRepository[]>;
   /** Session states keyed by session ID (from WS session_state_update). */
   sessionStates: Record<string, SessionMonitorState>;
   /** Session IDs currently being monitored. */
   monitoredSessionIds: Set<string>;
-  /** Subscription info for monitored sessions (session_id -> {projectPath, sessionFilePath}). */
-  monitoredSessionInfo: Record<string, { projectPath: string; sessionFilePath: string }>;
+  /** Subscription info for monitored sessions. */
+  monitoredSessionInfo: Record<string, { projectPath: string; sessionFilePath: string; hostId: string }>;
 
   selectedSessionId: string | null;
   selectedRepositoryPath: string | null;
@@ -51,7 +59,8 @@ interface SessionsState {
 
   // Actions
   fetchRepositories: (provider?: Provider) => Promise<void>;
-  addRepository: (path: string, provider?: Provider) => Promise<void>;
+  fetchAllRepositories: (provider?: Provider) => Promise<void>;
+  addRepository: (path: string, provider?: Provider, hostId?: string) => Promise<void>;
   removeRepository: (path: string, provider?: Provider) => Promise<void>;
   selectRepository: (path: string | null) => void;
   selectSession: (id: string | null) => void;
@@ -59,7 +68,6 @@ interface SessionsState {
   refreshSessions: () => Promise<void>;
   revealSession: (id: string) => void;
   clearReveal: () => void;
-
   startMonitoring: (
     sessionId: string,
     projectPath: string,
@@ -75,12 +83,15 @@ interface SessionsState {
 
   /** Called by WS hook when session_state_update arrives. */
   setSessionState: (sessionId: string, state: SessionMonitorState) => void;
-  /** Called by WS hook when sessions_updated arrives. */
+  /** Called by WS hook when sessions_updated arrives (legacy — routes to setHostRepositories). */
   setRepositories: (repos: SelectedRepository[]) => void;
+  /** Called by WS hook when sessions_updated arrives for a specific host. */
+  setHostRepositories: (hostId: string, repos: SelectedRepository[]) => void;
 }
 
 export const useSessionsStore = create<SessionsState>((set, get) => ({
   repositories: [],
+  _reposByHost: {},
   sessionStates: {},
   monitoredSessionIds: new Set(),
   monitoredSessionInfo: {},
@@ -95,21 +106,58 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   fetchRepositories: async (provider) => {
     set({ loading: true, error: null });
     try {
-      const repositories = await api.repositories.list(provider ?? get().activeProvider);
-      set({ repositories, loading: false });
-      useNotificationsStore.getState().syncFromRepositories(repositories);
+      const repos = await api.repositories.list(provider ?? get().activeProvider);
+      const tagged: HostedRepository[] = repos.map((r) => ({ ...r, host_id: LOCALHOST_HOST_ID }));
+      const reposByHost = { ...get()._reposByHost, [LOCALHOST_HOST_ID]: tagged };
+      const merged = (Object.values(reposByHost) as HostedRepository[][]).flat();
+      set({ repositories: merged, _reposByHost: reposByHost, loading: false });
+      useNotificationsStore.getState().syncFromRepositories(merged);
     } catch (err) {
       set({ error: (err as Error).message, loading: false });
     }
   },
 
-  addRepository: async (path, provider) => {
+  fetchAllRepositories: async (provider) => {
     set({ loading: true, error: null });
     try {
-      await api.repositories.add(path, provider ?? get().activeProvider);
-      // Re-fetch the full tree so the new repo shows with all its sessions
-      const repositories = await api.repositories.list(provider ?? get().activeProvider);
-      set({ repositories, loading: false });
+      const prov = provider ?? get().activeProvider;
+      const localRepos = await api.repositories.list(prov);
+      const tagged: HostedRepository[] = localRepos.map((r) => ({
+        ...r,
+        host_id: LOCALHOST_HOST_ID,
+      }));
+      const reposByHost: Record<string, HostedRepository[]> = { [LOCALHOST_HOST_ID]: tagged };
+
+      // Fetch from each connected remote host
+      const { useHostsStore } = await import('@/store/hosts');
+      const hostsState = useHostsStore.getState();
+      for (const host of hostsState.hosts) {
+        if (!hostsState.isConnected(host.id)) continue;
+        try {
+          const remoteRepos = await createApiForHost(host.id).repositories.list(prov);
+          reposByHost[host.id] = remoteRepos.map((r) => ({ ...r, host_id: host.id }));
+        } catch {
+          // Remote fetch failed — keep existing repos for that host
+          if (get()._reposByHost[host.id]) {
+            reposByHost[host.id] = get()._reposByHost[host.id] ?? [];
+          }
+        }
+      }
+
+      const merged = (Object.values(reposByHost) as HostedRepository[][]).flat();
+      set({ repositories: merged, _reposByHost: reposByHost, loading: false });
+      useNotificationsStore.getState().syncFromRepositories(merged);
+    } catch (err) {
+      set({ error: (err as Error).message, loading: false });
+    }
+  },
+
+  addRepository: async (path, provider, hostId = LOCALHOST_HOST_ID) => {
+    set({ loading: true, error: null });
+    try {
+      const apiClient = hostId === LOCALHOST_HOST_ID ? api : createApiForHost(hostId);
+      await apiClient.repositories.add(path, provider ?? get().activeProvider);
+      await get().fetchAllRepositories(provider);
     } catch (err) {
       set({ error: (err as Error).message, loading: false });
     }
@@ -151,7 +199,16 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   startMonitoring: async (sessionId, projectPath, sessionFilePath) => {
     set({ error: null });
     try {
-      const resp = await api.sessions.startMonitoring(
+      // Find the host for this session
+      const repo = get().repositories.find((r) =>
+        (r.worktrees ?? []).some((wt) =>
+          (wt.sessions ?? []).some((s) => s.id === sessionId),
+        ),
+      );
+      const hostId = (repo as HostedRepository | undefined)?.host_id ?? LOCALHOST_HOST_ID;
+      const apiClient = hostId === LOCALHOST_HOST_ID ? api : createApiForHost(hostId);
+
+      const resp = await apiClient.sessions.startMonitoring(
         sessionId,
         projectPath,
         sessionFilePath,
@@ -163,7 +220,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
         const states = { ...s.sessionStates };
         if (resp.state) states[sessionId] = resp.state;
         const info = { ...s.monitoredSessionInfo };
-        info[sessionId] = { projectPath, sessionFilePath: sessionFilePath ?? '' };
+        info[sessionId] = { projectPath, sessionFilePath: sessionFilePath ?? '', hostId };
         return { monitoredSessionIds: ids, sessionStates: states, monitoredSessionInfo: info };
       });
     } catch (err) {
@@ -232,7 +289,17 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   },
 
   setRepositories: (repos) => {
-    set({ repositories: repos });
-    useNotificationsStore.getState().syncFromRepositories(repos);
+    // Legacy: treat as localhost update
+    get().setHostRepositories(LOCALHOST_HOST_ID, repos);
+  },
+
+  setHostRepositories: (hostId, repos) => {
+    const tagged: HostedRepository[] = repos.map((r) => ({ ...r, host_id: hostId }));
+    set((s) => {
+      const reposByHost = { ...s._reposByHost, [hostId]: tagged };
+      const merged = (Object.values(reposByHost) as HostedRepository[][]).flat();
+      useNotificationsStore.getState().syncFromRepositories(merged);
+      return { repositories: merged, _reposByHost: reposByHost };
+    });
   },
 }));

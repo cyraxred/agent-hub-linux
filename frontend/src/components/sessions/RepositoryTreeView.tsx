@@ -1,6 +1,8 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import type { SelectedRepository, WorktreeBranch, CLISession } from '@/types/generated';
-import { useSessionsStore } from '@/store/sessions';
+import { useSessionsStore, type HostedRepository } from '@/store/sessions';
+import { useHostsStore, type ConnectionStatus } from '@/store/hosts';
+import { LOCALHOST_HOST_ID } from '@/types/hosts';
 import { api } from '@/api/client';
 import { SessionRow } from './SessionRow';
 
@@ -42,6 +44,10 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
   const fetchRepositories = useSessionsStore((s) => s.fetchRepositories);
   const revealSessionId = useSessionsStore((s) => s.revealSessionId);
   const clearReveal = useSessionsStore((s) => s.clearReveal);
+  const hosts = useHostsStore((s) => s.hosts);
+  const runtimeState = useHostsStore((s) => s.runtimeState);
+  const connectHost = useHostsStore((s) => s.connectHost);
+  const disconnectHost = useHostsStore((s) => s.disconnectHost);
 
   // Local expansion state for repos and worktrees.
   const [expandedRepos, setExpandedRepos] = useState<Set<string>>(
@@ -187,13 +193,15 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
     return (repo.worktrees ?? []).some(worktreeMatchesFilter);
   }
 
-  const filteredRepos = lowerFilter
+  const filteredRepos = (lowerFilter
     ? repositories.filter(repoMatchesFilter)
-    : repositories;
+    : repositories) as HostedRepository[];
 
-  return (
-    <div className="repo-tree">
-      {filteredRepos.map((repo) => {
+  // Group by host only when remotes are configured
+  const hasRemoteHosts = hosts.length > 0;
+
+  function renderRepoList(repoList: HostedRepository[]) {
+    return repoList.map((repo) => {
         const isRepoExpanded = expandedRepos.has(repo.path);
         const isRepoSelected = selectedRepositoryPath === repo.path;
         const totalSessions = countSessions(repo);
@@ -285,6 +293,105 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
                 <span>No sessions</span>
               </div>
             )}
+          </div>
+        );
+      });
+  }
+
+  if (!hasRemoteHosts) {
+    return <div className="repo-tree">{renderRepoList(filteredRepos)}</div>;
+  }
+
+  const [collapsedHosts, setCollapsedHosts] = useState<Set<string>>(() => new Set());
+
+  const toggleHost = useCallback((hostId: string) => {
+    setCollapsedHosts((prev) => {
+      const next = new Set(prev);
+      if (next.has(hostId)) next.delete(hostId);
+      else next.add(hostId);
+      return next;
+    });
+  }, []);
+
+  // Group by host
+  const reposByHost = new Map<string, HostedRepository[]>();
+  reposByHost.set(LOCALHOST_HOST_ID, []);
+  for (const h of hosts) reposByHost.set(h.id, []);
+  for (const repo of filteredRepos) {
+    const hostId = repo.host_id ?? LOCALHOST_HOST_ID;
+    if (!reposByHost.has(hostId)) reposByHost.set(hostId, []);
+    reposByHost.get(hostId)!.push(repo);
+  }
+
+  function hostLabel(hostId: string): string {
+    if (hostId === LOCALHOST_HOST_ID) return 'Local';
+    return hosts.find((h) => h.id === hostId)?.label ?? hostId;
+  }
+
+  function hostStatus(hostId: string): ConnectionStatus {
+    if (hostId === LOCALHOST_HOST_ID) return 'connected';
+    return runtimeState[hostId]?.status ?? 'disconnected';
+  }
+
+  const statusDotColor: Record<ConnectionStatus, string> = {
+    connected: 'var(--accent-green, #3fb950)',
+    connecting: 'var(--accent-yellow, #d29922)',
+    error: 'var(--accent-red, #ff7b72)',
+    disconnected: 'var(--text-tertiary)',
+  };
+
+  return (
+    <div className="repo-tree">
+      {[...reposByHost.entries()].map(([hostId, hostRepos]) => {
+        const isCollapsed = collapsedHosts.has(hostId);
+        return (
+          <div key={hostId} className="host-group">
+            <div className="host-group-header" onClick={() => toggleHost(hostId)} style={{ cursor: 'pointer' }}>
+              <button
+                className={`expand-btn ${isCollapsed ? '' : 'expanded'}`}
+                onClick={(e) => { e.stopPropagation(); toggleHost(hostId); }}
+                style={{ flexShrink: 0 }}
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+                  <path d="M4 2l4 4-4 4" />
+                </svg>
+              </button>
+              <span
+                className="status-dot"
+                style={{
+                  backgroundColor: statusDotColor[hostStatus(hostId)],
+                  width: 7,
+                  height: 7,
+                  flexShrink: 0,
+                }}
+              />
+              <span className="host-group-label">{hostLabel(hostId)}</span>
+              {hostId !== LOCALHOST_HOST_ID && (() => {
+                const st = hostStatus(hostId);
+                if (st === 'connected') {
+                  return (
+                    <button
+                      className="btn btn-ghost btn-xs"
+                      style={{ marginLeft: 'auto', padding: '1px 5px', fontSize: 10 }}
+                      onClick={(e) => { e.stopPropagation(); disconnectHost(hostId); }}
+                    >
+                      Disconnect
+                    </button>
+                  );
+                }
+                return (
+                  <button
+                    className="btn btn-primary btn-xs"
+                    style={{ marginLeft: 'auto', padding: '1px 5px', fontSize: 10 }}
+                    onClick={(e) => { e.stopPropagation(); connectHost(hostId); }}
+                    disabled={st === 'connecting'}
+                  >
+                    {st === 'connecting' ? '…' : 'Connect'}
+                  </button>
+                );
+              })()}
+            </div>
+            {!isCollapsed && renderRepoList(hostRepos)}
           </div>
         );
       })}

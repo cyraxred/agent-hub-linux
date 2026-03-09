@@ -117,10 +117,12 @@ def _register_websocket_endpoints(app: FastAPI) -> None:
     """Register WebSocket endpoints on the FastAPI app."""
     from agent_hub.api.websocket.handler import websocket_endpoint
     from agent_hub.api.websocket.terminal_handler import terminal_websocket_endpoint
+    from agent_hub.api.routes.hosts import ws_proxy_endpoint
 
     app.websocket("/ws")(websocket_endpoint)
     app.websocket("/ws/terminal/{key}")(terminal_websocket_endpoint)
-    logger.debug("Registered WebSocket endpoints: /ws, /ws/terminal/{key}")
+    app.websocket("/api/hosts/{host_id}/proxy/ws")(ws_proxy_endpoint)
+    logger.debug("Registered WebSocket endpoints: /ws, /ws/terminal/{key}, /api/hosts/{host_id}/proxy/ws")
 
 
 def _register_route_routers(app: FastAPI) -> None:

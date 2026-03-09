@@ -227,5 +227,78 @@ export class WebSocketClient {
   }
 }
 
-/** Singleton instance. */
-export const wsClient = new WebSocketClient();
+// ---------------------------------------------------------------------------
+// Multi-host WebSocket manager
+// ---------------------------------------------------------------------------
+
+/**
+ * Manages one ``WebSocketClient`` per connected host.
+ *
+ * Message handlers registered via ``onMessage`` receive messages from **all**
+ * hosts; each handler is called with an additional ``hostId`` argument so the
+ * consumer can tag data appropriately.
+ */
+export class WebSocketManager {
+  private clients = new Map<string, WebSocketClient>();
+
+  private _urlForHost(hostId: string): string {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    if (hostId === '__local__') return `${protocol}//${host}/ws`;
+    return `${protocol}//${host}/api/hosts/${encodeURIComponent(hostId)}/proxy/ws`;
+  }
+
+  /** Return or create (but do not connect) a client for *hostId*. */
+  getOrCreate(hostId: string): WebSocketClient {
+    if (!this.clients.has(hostId)) {
+      this.clients.set(hostId, new WebSocketClient(this._urlForHost(hostId)));
+    }
+    return this.clients.get(hostId)!;
+  }
+
+  /** Connect a remote host's WebSocket (call after ``api.hosts.connect`` succeeds). */
+  connectHost(hostId: string): void {
+    this.getOrCreate(hostId).connect();
+  }
+
+  /** Disconnect and remove a host's WebSocket. */
+  disconnectHost(hostId: string): void {
+    const client = this.clients.get(hostId);
+    if (client) {
+      client.disconnect();
+      this.clients.delete(hostId);
+    }
+  }
+
+  /** Register a message handler across ALL hosts. Returns an unsubscribe fn. */
+  onMessage(handler: (message: ServerMessage, hostId: string) => void): () => void {
+    const unsubs: Array<() => void> = [];
+    for (const [hostId, client] of this.clients) {
+      unsubs.push(client.onMessage((msg) => handler(msg, hostId)));
+    }
+    // Also register on clients added in future (stored for new connectHost calls)
+    this._pendingHandlers.add(handler);
+    return () => {
+      this._pendingHandlers.delete(handler);
+      for (const u of unsubs) u();
+    };
+  }
+
+  private _pendingHandlers = new Set<(message: ServerMessage, hostId: string) => void>();
+
+  /** Internal: wrap a new client so pending handlers receive its messages too. */
+  private _wrapClient(hostId: string, client: WebSocketClient): void {
+    for (const handler of this._pendingHandlers) {
+      client.onMessage((msg) => handler(msg, hostId));
+    }
+  }
+
+  get(hostId: string): WebSocketClient | undefined {
+    return this.clients.get(hostId);
+  }
+}
+
+export const wsManager = new WebSocketManager();
+
+/** Singleton instance for the local backend — backward-compatible. */
+export const wsClient = wsManager.getOrCreate('__local__');

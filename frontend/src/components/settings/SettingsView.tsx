@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { useSettingsStore } from '@/store/settings';
 import { useProvidersStore } from '@/store/providers';
+import { HostsSettingsSection } from './HostsSettingsSection';
 
 export const SettingsView: React.FC = () => {
   const { settings, loading, error, dirty, fetchSettings, updateSettings, saveSettings } =
@@ -166,6 +167,7 @@ export const SettingsView: React.FC = () => {
           </div>
         </div>
       </div>
+      <HostsSettingsSection />
     </div>
   );
 };

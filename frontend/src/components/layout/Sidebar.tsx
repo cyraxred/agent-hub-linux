@@ -2,8 +2,10 @@ import React, { useState } from 'react';
 import { useSessionsStore } from '@/store/sessions';
 import { useSettingsStore } from '@/store/settings';
 import { useNotificationsStore } from '@/store/notifications';
+import { useHostsStore } from '@/store/hosts';
 import { RepositoryTreeView } from '@/components/sessions/RepositoryTreeView';
 import { ProviderSegmentedControl } from '@/components/sessions/ProviderSegmentedControl';
+import { LOCALHOST_HOST_ID } from '@/types/hosts';
 import type { CLISession } from '@/types/generated';
 
 const TIMEOUT_OPTIONS = [0, 3, 5, 10, 15, 30] as const;
@@ -39,11 +41,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
   const selectSession = useSessionsStore((s) => s.selectSession);
   const addRepository = useSessionsStore((s) => s.addRepository);
   const { settings, updateSettings, saveSettings } = useSettingsStore();
+  const hosts = useHostsStore((s) => s.hosts);
+  const isConnected = useHostsStore((s) => s.isConnected);
   const notifications = useNotificationsStore((s) => s.notifications);
   const approvalTimeout = (settings.approval_timeout_seconds as number) ?? 10;
 
   const [showAddRepo, setShowAddRepo] = useState(false);
   const [newRepoPath, setNewRepoPath] = useState('');
+  const [addRepoHostId, setAddRepoHostId] = useState(LOCALHOST_HOST_ID);
   const [addingRepo, setAddingRepo] = useState(false);
   const [addRepoError, setAddRepoError] = useState<string | null>(null);
   const [filterText, setFilterText] = useState('');
@@ -54,9 +59,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
     setAddingRepo(true);
     setAddRepoError(null);
     try {
-      await addRepository(trimmed);
+      await addRepository(trimmed, undefined, addRepoHostId);
       setShowAddRepo(false);
       setNewRepoPath('');
+      setAddRepoHostId(LOCALHOST_HOST_ID);
     } catch (err) {
       setAddRepoError((err as Error).message);
     } finally {
@@ -67,6 +73,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
   const handleCancelAddRepo = () => {
     setShowAddRepo(false);
     setNewRepoPath('');
+    setAddRepoHostId(LOCALHOST_HOST_ID);
     setAddRepoError(null);
   };
 
@@ -153,6 +160,22 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
 
         {showAddRepo && (
           <div className="sidebar-add-repo">
+            {hosts.length > 0 && (
+              <select
+                className="setting-select"
+                value={addRepoHostId}
+                onChange={(e) => setAddRepoHostId(e.target.value)}
+                disabled={addingRepo}
+                style={{ marginBottom: 'var(--space-xs)', width: '100%' }}
+              >
+                <option value={LOCALHOST_HOST_ID}>Local</option>
+                {hosts.map((h) => (
+                  <option key={h.id} value={h.id} disabled={!isConnected(h.id)}>
+                    {h.label}{!isConnected(h.id) ? ' (disconnected)' : ''}
+                  </option>
+                ))}
+              </select>
+            )}
             <input
               type="text"
               className="setting-input"
