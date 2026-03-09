@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import type { SelectedRepository, WorktreeBranch, CLISession } from '@/types/generated';
 import { useSessionsStore } from '@/store/sessions';
 import { api } from '@/api/client';
@@ -40,6 +40,8 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
   const startMonitoring = useSessionsStore((s) => s.startMonitoring);
   const removeRepository = useSessionsStore((s) => s.removeRepository);
   const fetchRepositories = useSessionsStore((s) => s.fetchRepositories);
+  const revealSessionId = useSessionsStore((s) => s.revealSessionId);
+  const clearReveal = useSessionsStore((s) => s.clearReveal);
 
   // Local expansion state for repos and worktrees.
   const [expandedRepos, setExpandedRepos] = useState<Set<string>>(
@@ -80,6 +82,34 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
       return next;
     });
   }, []);
+
+  // Reveal: expand the containing repo+worktree and scroll the session row into view
+  useEffect(() => {
+    if (!revealSessionId) return;
+    for (const repo of repositories) {
+      for (const wt of repo.worktrees ?? []) {
+        if ((wt.sessions ?? []).some((s) => s.id === revealSessionId)) {
+          setExpandedRepos((prev) => {
+            const next = new Set(prev);
+            next.add(repo.path);
+            return next;
+          });
+          setExpandedWorktrees((prev) => {
+            const next = new Set(prev);
+            next.add(`${repo.path}::${wt.path}`);
+            return next;
+          });
+          // Scroll after state updates flush
+          setTimeout(() => {
+            document.querySelector(`[data-session-id="${revealSessionId}"]`)
+              ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }, 50);
+          break;
+        }
+      }
+    }
+    clearReveal();
+  }, [revealSessionId, repositories, clearReveal]);
 
   const handleSessionClick = useCallback(
     (session: CLISession) => {
@@ -362,15 +392,16 @@ const WorktreeNode: React.FC<WorktreeNodeProps> = ({
       {isExpanded && sortedSessions.length > 0 && (
         <div className="repo-sessions">
           {sortedSessions.map((session) => (
-            <SessionRow
-              key={session.id}
-              session={session}
-              isSelected={selectedSessionId === session.id}
-              isMonitored={monitoredSessionIds.has(session.id)}
-              monitorState={sessionStates[session.id]}
-              onClick={() => onSessionClick(session)}
-              onDoubleClick={() => onSessionDoubleClick(session)}
-            />
+            <div key={session.id} data-session-id={session.id}>
+              <SessionRow
+                session={session}
+                isSelected={selectedSessionId === session.id}
+                isMonitored={monitoredSessionIds.has(session.id)}
+                monitorState={sessionStates[session.id]}
+                onClick={() => onSessionClick(session)}
+                onDoubleClick={() => onSessionDoubleClick(session)}
+              />
+            </div>
           ))}
         </div>
       )}

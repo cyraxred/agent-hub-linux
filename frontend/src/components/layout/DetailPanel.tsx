@@ -1,6 +1,7 @@
 import React from 'react';
 import type { DetailView } from './AppLayout';
 import type { CLISession, SelectedRepository, SessionMonitorState } from '@/types/generated';
+import { useSessionsStore } from '@/store/sessions';
 import { EmbeddedTerminal } from '@/components/terminal/EmbeddedTerminal';
 import { PendingChangesView } from '@/components/diff/PendingChangesView';
 import { PlanView } from '@/components/plan/PlanView';
@@ -31,7 +32,10 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
     selectedSession,
     monitoredSessionIds,
     sessionStates,
+    repositories,
   } = sessionData;
+
+  const revealSession = useSessionsStore((s) => s.revealSession);
 
   // Settings and launcher views do not require a selected session
   if (activeView === 'settings') {
@@ -85,6 +89,20 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
   const sessionState = sessionStates[selectedSession.id];
   const statusKind = sessionState?.status?.kind ?? 'idle';
 
+  // Find repo + worktree names for the breadcrumb
+  let repoName: string | null = null;
+  let worktreeName: string | null = null;
+  for (const repo of repositories) {
+    for (const wt of repo.worktrees ?? []) {
+      if ((wt.sessions ?? []).some((s) => s.id === selectedSession.id)) {
+        repoName = repo.name;
+        worktreeName = wt.is_worktree ? wt.name : null;
+        break;
+      }
+    }
+    if (repoName) break;
+  }
+
   const renderView = () => {
     switch (activeView) {
       case 'session':
@@ -128,6 +146,27 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
     <main className="detail-panel">
       <div className="detail-header">
         <div className="detail-header-info">
+          {repoName && (
+            <button
+              className="detail-breadcrumb"
+              onClick={() => revealSession(selectedSession.id)}
+              title="Reveal in sidebar"
+            >
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" style={{ opacity: 0.6 }}>
+                <path d="M1.75 1A1.75 1.75 0 000 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0016 13.25v-8.5A1.75 1.75 0 0014.25 3H7.5a.25.25 0 01-.2-.1l-.9-1.2C6.07 1.26 5.55 1 5 1H1.75z" />
+              </svg>
+              <span>{repoName}</span>
+              {worktreeName && (
+                <>
+                  <span className="detail-breadcrumb-sep">/</span>
+                  <span>{worktreeName}</span>
+                </>
+              )}
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style={{ opacity: 0.4 }}>
+                <path d="M3.75 2h3.5a.75.75 0 010 1.5h-3.5a.25.25 0 00-.25.25v8.5c0 .138.112.25.25.25h8.5a.25.25 0 00.25-.25v-3.5a.75.75 0 011.5 0v3.5A1.75 1.75 0 0112.25 14h-8.5A1.75 1.75 0 012 12.25v-8.5C2 2.784 2.784 2 3.75 2zm6.5 0h3a.75.75 0 01.75.75v3a.75.75 0 01-1.5 0V3.81L8.03 8.78a.75.75 0 01-1.06-1.06l4.97-4.97H10.25a.75.75 0 010-1.5z" />
+              </svg>
+            </button>
+          )}
           <h2 className="detail-title">
             {selectedSession.slug ?? selectedSession.id.slice(0, 12)}
           </h2>

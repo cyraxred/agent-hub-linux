@@ -785,6 +785,23 @@
 
 .detail-header-info { display: flex; flex-direction: column; gap: var(--space-xxs); }
 
+.detail-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-tertiary);
+  font-size: var(--font-size-xs);
+  font-family: inherit;
+  transition: color 0.15s;
+  margin-bottom: 2px;
+}
+.detail-breadcrumb:hover { color: var(--text-secondary); }
+.detail-breadcrumb-sep { opacity: 0.4; }
+
 .detail-title {
   font-size: var(--font-size-lg);
   font-weight: 600;
@@ -2569,6 +2586,16 @@
 
 
 /* ── Launcher ──────────────────────────────────────── */
+
+.launch-success-banner {
+  background: color-mix(in srgb, var(--accent-green, #3fb950) 15%, transparent);
+  border: 1px solid var(--accent-green, #3fb950);
+  color: var(--accent-green, #3fb950);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-md);
+  margin-bottom: var(--space-md);
+  font-size: var(--font-size-sm);
+}
 
 .multi-launch-view {
   padding: var(--space-xl) var(--space-2xl);

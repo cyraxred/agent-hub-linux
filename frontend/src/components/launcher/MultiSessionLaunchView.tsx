@@ -23,6 +23,8 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
   const repositories = useSessionsStore((s) => s.repositories);
   const selectedRepositoryPath = useSessionsStore((s) => s.selectedRepositoryPath);
   const addRepository = useSessionsStore((s) => s.addRepository);
+  const fetchRepositories = useSessionsStore((s) => s.fetchRepositories);
+  const selectSession = useSessionsStore((s) => s.selectSession);
   const { providers, fetchProviders } = useProvidersStore();
 
   useEffect(() => {
@@ -45,6 +47,7 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
   const [worktreeRepoPath, setWorktreeRepoPath] = useState<string>('');
   const [worktreeConfigIndex, setWorktreeConfigIndex] = useState<number | null>(null);
   const [launching, setLaunching] = useState(false);
+  const [launchSuccess, setLaunchSuccess] = useState(false);
   const [addRepoIndex, setAddRepoIndex] = useState<number | null>(null);
   const [newRepoPath, setNewRepoPath] = useState('');
   const [addingRepo, setAddingRepo] = useState(false);
@@ -112,6 +115,13 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
   const handleLaunch = async () => {
     setLaunching(true);
     try {
+      // Snapshot existing session IDs before launch so we can detect the new one
+      const existingIds = new Set(
+        repositories.flatMap((r) =>
+          (r.worktrees ?? []).flatMap((wt) => (wt.sessions ?? []).map((s) => s.id)),
+        ),
+      );
+
       for (const config of configs) {
         if (!config.repoPath) continue;
         let prompt = config.prompt.trim();
@@ -126,8 +136,37 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
           prompt: prompt || undefined,
         });
       }
-      // Navigate to the terminal view after launching
-      onLaunched?.();
+
+      // Poll for the new session to appear (up to 15s)
+      const launchedPaths = new Set(validConfigs.map((c) => c.repoPath));
+      const deadline = Date.now() + 15000;
+      let found: string | null = null;
+      while (Date.now() < deadline && !found) {
+        await new Promise((r) => setTimeout(r, 1000));
+        await fetchRepositories();
+        const repos = useSessionsStore.getState().repositories;
+        for (const repo of repos) {
+          for (const wt of repo.worktrees ?? []) {
+            if (!launchedPaths.has(wt.path) && !launchedPaths.has(repo.path)) continue;
+            for (const session of wt.sessions ?? []) {
+              if (!existingIds.has(session.id)) {
+                found = session.id;
+                break;
+              }
+            }
+            if (found) break;
+          }
+          if (found) break;
+        }
+      }
+
+      if (found) {
+        selectSession(found);
+        onLaunched?.();
+      } else {
+        setLaunchSuccess(true);
+        setTimeout(() => setLaunchSuccess(false), 4000);
+      }
     } finally {
       setLaunching(false);
     }
@@ -144,6 +183,12 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
           its own process with optional git worktree isolation.
         </p>
       </div>
+
+      {launchSuccess && (
+        <div className="launch-success-banner">
+          Session{validConfigs.length !== 1 ? 's' : ''} launched — select from the sidebar to view the terminal.
+        </div>
+      )}
 
       {/* Session Configurations */}
       <div className="launch-section">

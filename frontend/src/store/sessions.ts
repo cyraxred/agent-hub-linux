@@ -46,6 +46,8 @@ interface SessionsState {
   error: string | null;
   /** User-assigned custom names for sessions (session_id -> name). */
   customSessionNames: Record<string, string>;
+  /** Session ID to reveal/focus in the sidebar tree (cleared after handling). */
+  revealSessionId: string | null;
 
   // Actions
   fetchRepositories: (provider?: Provider) => Promise<void>;
@@ -55,6 +57,8 @@ interface SessionsState {
   selectSession: (id: string | null) => void;
   setActiveProvider: (provider: Provider) => void;
   refreshSessions: () => Promise<void>;
+  revealSession: (id: string) => void;
+  clearReveal: () => void;
 
   startMonitoring: (
     sessionId: string,
@@ -86,6 +90,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   loading: false,
   error: null,
   customSessionNames: {},
+  revealSessionId: null,
 
   fetchRepositories: async (provider) => {
     set({ loading: true, error: null });
@@ -126,6 +131,8 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 
   selectRepository: (path) => set({ selectedRepositoryPath: path }),
   selectSession: (id) => set({ selectedSessionId: id }),
+  revealSession: (id) => set({ revealSessionId: id }),
+  clearReveal: () => set({ revealSessionId: null }),
   setActiveProvider: (provider) => {
     set({ activeProvider: provider });
     get().fetchRepositories(provider);
