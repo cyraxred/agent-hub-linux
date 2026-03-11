@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect } from 'react';
 import type { SelectedRepository, WorktreeBranch } from '@/types/generated';
 import { SessionId } from '@/types/session';
 import { useSessionsStore, type HostedRepository, type TaggedSession, type TaggedWorktreeBranch } from '@/store/sessions';
+import { useHiddenSessionsStore } from '@/store/hiddenSessions';
 import { useHostsStore, type ConnectionStatus } from '@/store/hosts';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
 import { api } from '@/api/client';
@@ -30,9 +31,13 @@ function countActiveSessions(repo: SelectedRepository): number {
 
 interface RepositoryTreeViewProps {
   filter?: string;
+  showHidden?: boolean;
+  recentOnly?: boolean;
 }
 
-export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }) => {
+const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+
+export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter, showHidden = false, recentOnly = false }) => {
   const repositories = useSessionsStore((s) => s.repositories);
   const selectedSessionId = useSessionsStore((s) => s.selectedSessionId);
   const selectedRepositoryPath = useSessionsStore((s) => s.selectedRepositoryPath);
@@ -168,10 +173,18 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
     [],
   );
 
+  const hiddenIds = useHiddenSessionsStore((s) => s.hiddenIds);
+
   // Apply text filter across repo names, worktree names, and session slugs/messages
   const lowerFilter = filter?.toLowerCase() ?? '';
 
   function sessionMatchesFilter(session: TaggedSession): boolean {
+    const rawId = SessionId.rawId(session.id);
+    const isHidden = hiddenIds.has(rawId);
+    // In normal mode: hide hidden sessions. In showHidden mode: show only hidden sessions.
+    if (showHidden ? !isHidden : isHidden) return false;
+    // Recent-only: skip sessions older than 3 days
+    if (recentOnly && Date.now() - new Date(session.last_activity_at).getTime() > THREE_DAYS_MS) return false;
     if (!lowerFilter) return true;
     return (
       (session.slug?.toLowerCase().includes(lowerFilter) ?? false) ||
@@ -265,9 +278,7 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
                 {worktrees.map((wt) => {
                   const wtKey = `${repo.path}::${wt.path}`;
                   const isWtExpanded = expandedWorktrees.has(wtKey);
-                  const sessions = lowerFilter
-                    ? (wt.sessions ?? []).filter(sessionMatchesFilter)
-                    : (wt.sessions ?? []);
+                  const sessions = (wt.sessions ?? []).filter(sessionMatchesFilter);
 
                   return (
                     <WorktreeNode
@@ -283,6 +294,7 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
                       onSessionDoubleClick={handleSessionDoubleClick}
                       onDeleteWorktree={handleDeleteWorktree}
                       onStartSession={handleStartSession}
+                      isHiddenView={showHidden}
                     />
                   );
                 })}
@@ -416,6 +428,7 @@ interface WorktreeNodeProps {
   onSessionDoubleClick: (session: TaggedSession) => void;
   onDeleteWorktree: (e: React.MouseEvent, worktreePath: string) => void;
   onStartSession: (e: React.MouseEvent, projectPath: string) => void;
+  isHiddenView?: boolean;
 }
 
 const WorktreeNode: React.FC<WorktreeNodeProps> = ({
@@ -430,6 +443,7 @@ const WorktreeNode: React.FC<WorktreeNodeProps> = ({
   onSessionDoubleClick,
   onDeleteWorktree,
   onStartSession,
+  isHiddenView = false,
 }) => {
   const sortedSessions = [...sessions].sort(
     (a, b) =>
@@ -508,6 +522,7 @@ const WorktreeNode: React.FC<WorktreeNodeProps> = ({
                 monitorState={sessionStates[session.id]}
                 onClick={() => onSessionClick(session)}
                 onDoubleClick={() => onSessionDoubleClick(session)}
+                isHiddenView={isHiddenView}
               />
             </div>
           ))}

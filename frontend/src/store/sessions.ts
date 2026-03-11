@@ -79,6 +79,7 @@ interface SessionsState {
   selectSession: (id: SessionId | null) => void;
   setActiveProvider: (provider: Provider) => void;
   refreshSessions: () => Promise<void>;
+  deleteSession: (sessionId: SessionId) => Promise<void>;
   revealSession: (id: SessionId) => void;
   clearReveal: () => void;
   startMonitoring: (
@@ -229,6 +230,20 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     set({ error: null });
     try {
       await api.repositories.refresh(get().activeProvider);
+      await get().fetchRepositories();
+    } catch (err) {
+      set({ error: (err as Error).message });
+    }
+  },
+
+  deleteSession: async (sessionId) => {
+    set({ error: null });
+    try {
+      await api.sessions.delete(sessionId);
+      // Deselect if currently selected
+      if (get().selectedSessionId === sessionId) {
+        set({ selectedSessionId: null });
+      }
       await get().fetchRepositories();
     } catch (err) {
       set({ error: (err as Error).message });

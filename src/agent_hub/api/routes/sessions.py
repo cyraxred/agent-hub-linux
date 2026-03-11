@@ -67,6 +67,13 @@ class RefreshResponse(BaseModel):
     message: str = ""
 
 
+class DeleteSessionResponse(BaseModel):
+    """Response after deleting a session."""
+
+    session_id: str
+    deleted: bool = True
+
+
 class CreatePendingSessionRequest(BaseModel):
     """Request body for creating a pre-seeded pending session."""
 
@@ -353,6 +360,31 @@ async def get_session(session_id: str, request: Request) -> SessionDetailRespons
         repository_path=repo_path,
         provider=provider_name,
     )
+
+
+@router.delete("/{session_id}", response_model=DeleteSessionResponse)
+async def delete_session(session_id: str, request: Request) -> DeleteSessionResponse:
+    """Delete a session: remove its JSONL file and metadata, then refresh."""
+    prov = _get_provider(request)
+
+    file_path = _find_session_file(prov, session_id)
+    if file_path:
+        try:
+            Path(file_path).unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to delete session file %s", file_path)
+
+    try:
+        await prov.metadata_store.delete_metadata(session_id)
+    except Exception:
+        logger.exception("Failed to delete metadata for session %s", session_id)
+
+    try:
+        await prov.claude_monitor.refresh_sessions()
+    except Exception:
+        logger.exception("Failed to refresh sessions after deleting %s", session_id)
+
+    return DeleteSessionResponse(session_id=session_id, deleted=True)
 
 
 @router.post("/{session_id}/monitor", response_model=MonitorStateResponse)

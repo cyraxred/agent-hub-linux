@@ -307,6 +307,9 @@ function buildApiClient(base: string) {
           project_path: projectPath,
           prompt,
         }),
+      delete: async (id: SessionId): Promise<void> => {
+        await d(`/sessions/${encodeURIComponent(SessionId.rawId(id))}`);
+      },
       getAllNames: async (): Promise<Record<string, string>> => {
         const r = await g<{ names: Record<string, string> }>('/sessions/names/all');
         return r.names ?? {};

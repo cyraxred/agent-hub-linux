@@ -561,6 +561,30 @@
   color: var(--text-primary);
   background: var(--bg-hover);
 }
+.sidebar-view-options {
+  display: flex;
+  gap: var(--space-xs);
+  padding: 4px var(--space-md);
+  border-bottom: 1px solid var(--border-muted);
+}
+.view-opt-btn {
+  font-size: var(--font-size-xs);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-muted);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.view-opt-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+.view-opt-btn.active {
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 10%, transparent);
+}
 
 .running-badge {
   display: inline-flex;
@@ -674,6 +698,44 @@
 }
 .session-row:hover .session-rename-btn {
   display: inline-flex;
+}
+
+.session-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-secondary, #8b949e);
+  cursor: pointer;
+  padding: 3px 7px;
+  flex-shrink: 0;
+  line-height: 1;
+  border-radius: var(--radius-sm);
+}
+.session-action-btn:hover {
+  color: var(--accent-blue, #58a6ff);
+  background: color-mix(in srgb, var(--accent-blue, #58a6ff) 10%, transparent);
+}
+.session-delete-btn {
+  color: var(--text-secondary, #8b949e);
+}
+.session-delete-btn:hover {
+  color: var(--accent-red, #ff7b72);
+  background: color-mix(in srgb, var(--accent-red, #ff7b72) 10%, transparent);
+}
+
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.session-delete-confirm {
+  font-size: var(--font-size-xs);
+  color: var(--accent-red, #ff7b72);
+  align-self: center;
+  margin-right: 2px;
 }
 
 .session-rename-input {

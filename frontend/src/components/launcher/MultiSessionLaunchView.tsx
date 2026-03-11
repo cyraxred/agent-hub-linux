@@ -10,6 +10,7 @@ const ADD_NEW_SENTINEL = '__add_new__';
 interface LaunchConfig {
   repoPath: string;
   provider: string;
+  name: string;
   prompt: string;
   branch: string;
   useWorktree: boolean;
@@ -27,6 +28,7 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
   const refreshSessions = useSessionsStore((s) => s.refreshSessions);
   const selectSession = useSessionsStore((s) => s.selectSession);
   const revealSession = useSessionsStore((s) => s.revealSession);
+  const setSessionName = useSessionsStore((s) => s.setSessionName);
   const { providers, fetchProviders } = useProvidersStore();
 
   useEffect(() => {
@@ -39,6 +41,7 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
     {
       repoPath: selectedRepositoryPath ?? '',
       provider: defaultProvider,
+      name: '',
       prompt: '',
       branch: '',
       useWorktree: false,
@@ -66,6 +69,7 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
       {
         repoPath: selectedRepositoryPath ?? repositories[0]?.path ?? '',
         provider: defaultProvider,
+        name: '',
         prompt: '',
         branch: '',
         useWorktree: false,
@@ -129,6 +133,11 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
         // When the user opens the terminal, EmbeddedTerminal resumes it with --resume.
         const resp = await api.sessions.createPending(config.repoPath, prompt);
         lastSessionId = SessionId.wrap(resp.session_id, 0);
+
+        // Persist the custom name if provided
+        if (config.name.trim()) {
+          setSessionName(lastSessionId, config.name.trim());
+        }
       }
 
       if (lastSessionId) {
@@ -227,6 +236,18 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
                       <option value={ADD_NEW_SENTINEL}>+ Add new repository...</option>
                     </select>
                   )}
+                </div>
+
+                {/* Session name */}
+                <div className="config-field">
+                  <label>Name</label>
+                  <input
+                    type="text"
+                    className="setting-input"
+                    placeholder="Optional session name..."
+                    value={config.name}
+                    onChange={(e) => updateConfig(index, { name: e.target.value })}
+                  />
                 </div>
 
                 {/* Provider select */}

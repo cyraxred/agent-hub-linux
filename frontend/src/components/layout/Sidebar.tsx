@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { useSessionsStore } from '@/store/sessions';
+import { useHiddenSessionsStore } from '@/store/hiddenSessions';
 import { useSettingsStore } from '@/store/settings';
 import { useNotificationsStore } from '@/store/notifications';
 import { useHostsStore } from '@/store/hosts';
@@ -54,6 +55,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
   const [addingRepo, setAddingRepo] = useState(false);
   const [addRepoError, setAddRepoError] = useState<string | null>(null);
   const [filterText, setFilterText] = useState('');
+  const showHidden = useHiddenSessionsStore((s) => s.showHidden);
+  const toggleShowHidden = useHiddenSessionsStore((s) => s.toggleShowHidden);
+  const recentOnly = useHiddenSessionsStore((s) => s.recentOnly);
+  const toggleRecentOnly = useHiddenSessionsStore((s) => s.toggleRecentOnly);
 
   const handleAddRepo = async () => {
     const trimmed = newRepoPath.trim();
@@ -216,29 +221,43 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
       </div>
 
       {repositories.length > 0 && (
-        <div className="sidebar-search">
-          <svg className="sidebar-search-icon" width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z" />
-          </svg>
-          <input
-            type="text"
-            className="sidebar-search-input"
-            placeholder="Filter sessions..."
-            value={filterText}
-            onChange={(e) => setFilterText(e.target.value)}
-          />
-          {filterText && (
+        <>
+          <div className="sidebar-search">
+            <svg className="sidebar-search-icon" width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z" />
+            </svg>
+            <input
+              type="text"
+              className="sidebar-search-input"
+              placeholder="Filter sessions..."
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+            />
+            {filterText && (
+              <button className="sidebar-search-clear" onClick={() => setFilterText('')} title="Clear filter">
+                <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.749.749 0 011.275.326.749.749 0 01-.215.734L9.06 8l3.22 3.22a.749.749 0 01-.326 1.275.749.749 0 01-.734-.215L8 9.06l-3.22 3.22a.751.751 0 01-1.042-.018.751.751 0 01-.018-1.042L6.94 8 3.72 4.78a.75.75 0 010-1.06z" />
+                </svg>
+              </button>
+            )}
+          </div>
+          <div className="sidebar-view-options">
             <button
-              className="sidebar-search-clear"
-              onClick={() => setFilterText('')}
-              title="Clear filter"
+              className={`view-opt-btn ${recentOnly ? 'active' : ''}`}
+              onClick={toggleRecentOnly}
+              title="Show sessions from last 3 days"
             >
-              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.749.749 0 011.275.326.749.749 0 01-.215.734L9.06 8l3.22 3.22a.749.749 0 01-.326 1.275.749.749 0 01-.734-.215L8 9.06l-3.22 3.22a.751.751 0 01-1.042-.018.751.751 0 01-.018-1.042L6.94 8 3.72 4.78a.75.75 0 010-1.06z" />
-              </svg>
+              Recent
             </button>
-          )}
-        </div>
+            <button
+              className={`view-opt-btn ${showHidden ? 'active' : ''}`}
+              onClick={toggleShowHidden}
+              title="Show hidden sessions"
+            >
+              Hidden
+            </button>
+          </div>
+        </>
       )}
 
       <div className="sidebar-section sidebar-tree">
@@ -265,7 +284,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
             </span>
           </div>
         ) : (
-          <RepositoryTreeView filter={filterText} />
+          <RepositoryTreeView filter={filterText} showHidden={showHidden} recentOnly={recentOnly} />
         )}
       </div>
 
