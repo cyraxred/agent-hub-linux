@@ -1,7 +1,8 @@
 import React from 'react';
 import type { DetailView } from './AppLayout';
-import type { CLISession, SelectedRepository, SessionMonitorState } from '@/types/generated';
-import { useSessionsStore } from '@/store/sessions';
+import type { SelectedRepository, SessionMonitorState } from '@/types/generated';
+import { useSessionsStore, type TaggedSession } from '@/store/sessions';
+import { SessionId } from '@/types/session';
 import { EmbeddedTerminal } from '@/components/terminal/EmbeddedTerminal';
 import { PendingChangesView } from '@/components/diff/PendingChangesView';
 import { PlanView } from '@/components/plan/PlanView';
@@ -13,11 +14,10 @@ import { MultiSessionLaunchView } from '@/components/launcher/MultiSessionLaunch
 interface DetailPanelProps {
   activeView: DetailView;
   sessionData: {
-    selectedSession: CLISession | null;
-    selectedSessionId: string | null;
+    selectedSession: TaggedSession | null;
     selectedRepositoryPath: string | null;
     repositories: SelectedRepository[];
-    monitoredSessionIds: Set<string>;
+    monitoredSessionIds: Set<SessionId>;
     sessionStates: Record<string, SessionMonitorState>;
   };
   onChangeView?: (view: DetailView) => void;

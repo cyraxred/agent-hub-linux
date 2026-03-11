@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react';
-import { useSessionsStore } from '@/store/sessions';
+import { useSessionsStore, type TaggedSession } from '@/store/sessions';
 import { useWebSocket } from './useWebSocket';
-import type { CLISession, SelectedRepository } from '@/types/generated';
+import type { SelectedRepository } from '@/types/generated';
 
 const AUTO_REFRESH_INTERVAL = 10_000;
 
@@ -67,7 +67,7 @@ export function useSessions() {
 
   // Compute: flatten all sessions from repos -> worktrees -> sessions
   const allSessions = useMemo(() => {
-    const sessions: CLISession[] = [];
+    const sessions: TaggedSession[] = [];
     for (const repo of repositories) {
       for (const wt of repo.worktrees ?? []) {
         for (const s of wt.sessions ?? []) {
@@ -78,8 +78,8 @@ export function useSessions() {
     return sessions;
   }, [repositories]);
 
-  // Compute: selected session (find CLISession by selectedSessionId)
-  const selectedSession = useMemo<CLISession | null>(() => {
+  // Compute: selected session (find TaggedSession by selectedSessionId)
+  const selectedSession = useMemo<TaggedSession | null>(() => {
     if (!selectedSessionId) return null;
     return allSessions.find((s) => s.id === selectedSessionId) ?? null;
   }, [allSessions, selectedSessionId]);

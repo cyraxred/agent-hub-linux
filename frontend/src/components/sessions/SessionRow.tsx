@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
-import type { CLISession, SessionMonitorState } from '@/types/generated';
-import { useSessionsStore } from '@/store/sessions';
+import type { SessionMonitorState } from '@/types/generated';
+import { useSessionsStore, type TaggedSession } from '@/store/sessions';
+import { SessionId } from '@/types/session';
 
 interface SessionRowProps {
-  session: CLISession;
+  session: TaggedSession;
   isSelected: boolean;
   isMonitored: boolean;
   onClick: () => void;
@@ -32,7 +33,7 @@ function truncate(text: string, maxLen: number): string {
 }
 
 function getStatusDotColor(
-  session: CLISession,
+  session: TaggedSession,
   isMonitored: boolean,
   monitorState?: SessionMonitorState,
 ): string {
@@ -71,7 +72,7 @@ export const SessionRow: React.FC<SessionRowProps> = ({
   const renameRef = useRef<HTMLInputElement>(null);
 
   const dotColor = getStatusDotColor(session, isMonitored, monitorState);
-  const displayName = customName || session.slug || session.id.slice(0, 8);
+  const displayName = customName || session.slug || SessionId.rawId(session.id).slice(0, 8);
   const firstMessagePreview = session.first_message
     ? truncate(session.first_message, 50)
     : null;
@@ -135,7 +136,7 @@ export const SessionRow: React.FC<SessionRowProps> = ({
               }}
               onBlur={handleRenameSubmit}
               onClick={(e) => e.stopPropagation()}
-              placeholder={session.id.slice(0, 8)}
+              placeholder={SessionId.rawId(session.id).slice(0, 8)}
             />
           ) : (
             <span className="session-title-row">

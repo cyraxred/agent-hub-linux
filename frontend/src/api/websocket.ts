@@ -5,6 +5,7 @@
  */
 
 import type { ClientMessage, ServerMessage } from '@/types/generated';
+import { SessionId } from '@/types/session';
 
 type MessageHandler = (message: ServerMessage) => void;
 type ConnectionHandler = (connected: boolean) => void;
@@ -17,7 +18,7 @@ const RECONNECT_MULTIPLIER = 1.5;
  * Subscription info needed by the backend to start watching a session.
  */
 export interface SubscriptionInfo {
-  sessionId: string;
+  sessionId: SessionId;
   projectPath: string;
   sessionFilePath: string;
 }
@@ -71,7 +72,7 @@ export class WebSocketClient {
       for (const info of this.subscriptions.values()) {
         this.sendRaw({
           kind: 'subscribe_session',
-          session_id: info.sessionId,
+          session_id: SessionId.rawId(info.sessionId),
           project_path: info.projectPath,
           session_file_path: info.sessionFilePath,
         });
@@ -126,18 +127,18 @@ export class WebSocketClient {
     this.subscriptions.set(info.sessionId, info);
     this.sendRaw({
       kind: 'subscribe_session',
-      session_id: info.sessionId,
+      session_id: SessionId.rawId(info.sessionId),
       project_path: info.projectPath,
       session_file_path: info.sessionFilePath,
     });
   }
 
   /** Unsubscribe from a session. */
-  unsubscribe(sessionId: string): void {
+  unsubscribe(sessionId: SessionId): void {
     this.subscriptions.delete(sessionId);
     this.sendRaw({
       kind: 'unsubscribe_session',
-      session_id: sessionId,
+      session_id: SessionId.rawId(sessionId),
     });
   }
 

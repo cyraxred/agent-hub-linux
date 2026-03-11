@@ -1,3 +1,4 @@
+import { SessionId } from '@/types/session';
 import React, { useRef, useEffect, useCallback } from 'react';
 import { useSearchStore } from '@/store/search';
 import { useSessionsStore } from '@/store/sessions';
@@ -32,7 +33,7 @@ export const CommandPalette: React.FC = () => {
   const executeSelected = useCallback(() => {
     const selected = getSelected();
     if (selected) {
-      selectSession(selected.id);
+      selectSession(SessionId.local(selected.id));
       close();
     }
   }, [getSelected, selectSession, close]);
@@ -70,7 +71,7 @@ export const CommandPalette: React.FC = () => {
     setSelectedIndex(index);
     const selected = results[index];
     if (selected) {
-      selectSession(selected.id);
+      selectSession(SessionId.local(selected.id));
       close();
     }
   };

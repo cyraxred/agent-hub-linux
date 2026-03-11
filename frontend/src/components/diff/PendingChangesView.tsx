@@ -1,3 +1,4 @@
+import { SessionId } from '@/types/session';
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useGitStore } from '@/store/git';
 import { api } from '@/api/client';
@@ -6,7 +7,7 @@ import type { DiffComment } from '@/types/generated';
 
 interface PendingChangesViewProps {
   repoPath: string;
-  sessionId?: string | null;
+  sessionId?: SessionId | null;
   onTerminalLaunched?: () => void;
 }
 

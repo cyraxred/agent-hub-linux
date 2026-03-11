@@ -78,11 +78,19 @@ def spawn_terminal(
     args: list[str],
     cwd: str | None = None,
     env: dict[str, str] | None = None,
+    rows: int = 24,
+    cols: int = 80,
 ) -> TerminalProcess:
     """Spawn a process with a PTY.
 
     Returns a TerminalProcess with the child PID and master FD.
+    ``rows`` and ``cols`` set the initial terminal size so TUI apps
+    (like Claude Code) initialise correctly before a WebSocket resize arrives.
     """
+    import fcntl
+    import struct
+    import termios
+
     merged_env = dict(os.environ)
     if env:
         merged_env.update(env)
@@ -92,29 +100,31 @@ def spawn_terminal(
     for key in ("CLAUDECODE", "CLAUDE_CODE_SESSION"):
         merged_env.pop(key, None)
 
-    pid, fd = pty.openpty()
+    master_fd, slave_fd = pty.openpty()
+
+    # Set terminal size on the master before forking so the child inherits it.
+    winsize = struct.pack("HHHH", rows, cols, 0, 0)
+    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
 
     child_pid = os.fork()
     if child_pid == 0:
         # Child process
-        os.close(pid)
+        os.close(master_fd)
         os.setsid()
-        import fcntl
-        import termios
 
-        fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
-        os.dup2(fd, 0)
-        os.dup2(fd, 1)
-        os.dup2(fd, 2)
-        if fd > 2:
-            os.close(fd)
+        fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+        os.dup2(slave_fd, 0)
+        os.dup2(slave_fd, 1)
+        os.dup2(slave_fd, 2)
+        if slave_fd > 2:
+            os.close(slave_fd)
         if cwd:
             os.chdir(cwd)
         os.execvpe(args[0], args, merged_env)
     else:
         # Parent process
-        os.close(fd)
-        return TerminalProcess(pid=child_pid, fd=pid)
+        os.close(slave_fd)
+        return TerminalProcess(pid=child_pid, fd=master_fd)
 
 
 def resize_terminal(fd: int, rows: int, cols: int) -> None:

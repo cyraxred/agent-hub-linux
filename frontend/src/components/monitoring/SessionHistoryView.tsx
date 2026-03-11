@@ -1,3 +1,4 @@
+import { SessionId } from '@/types/session';
 import React, { useCallback, useEffect, useState } from 'react';
 import { api } from '@/api/client';
 import { historyAppendBus } from '@/store/sessions';
@@ -10,7 +11,7 @@ interface HistoryEntry {
 }
 
 interface SessionHistoryViewProps {
-  sessionId: string;
+  sessionId: SessionId;
   /** When true, subscribe to WS-pushed history entries from the file watcher. */
   isMonitored?: boolean;
 }

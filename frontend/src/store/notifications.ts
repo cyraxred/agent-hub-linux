@@ -1,21 +1,44 @@
 import { create } from 'zustand';
-import type { AttentionNotification, CLISession, SelectedRepository } from '@/types/generated';
+import type { AttentionNotification } from '@/types/generated';
+import { SessionId } from '@/types/session';
+
+/**
+ * An AttentionNotification whose session_id has been scoped to its host via SessionId.
+ * Mirrors the TaggedSession pattern in sessions.ts.
+ */
+export type TaggedNotification = Omit<AttentionNotification, 'session_id'> & {
+  session_id: SessionId;
+};
+
+/**
+ * Minimal repository shape required by syncFromRepositories.
+ * Defined locally to avoid a circular import with store/sessions.ts.
+ */
+type SyncableRepository = {
+  worktrees?: Array<{
+    sessions?: Array<{
+      id: SessionId;
+      needs_attention?: string | null;
+      last_activity_at: string;
+    }>;
+  }>;
+};
 
 interface NotificationsState {
-  notifications: AttentionNotification[];
+  notifications: TaggedNotification[];
   /** Session IDs that already have a notification (prevents duplicates). */
-  _trackedSessionIds: Set<string>;
-  addNotification: (notification: AttentionNotification) => void;
+  _trackedSessionIds: Set<SessionId>;
+  addNotification: (notification: TaggedNotification) => void;
   resolveNotification: (notificationId: string) => void;
-  resolveBySessionId: (sessionId: string) => void;
-  setNotifications: (notifications: AttentionNotification[]) => void;
+  resolveBySessionId: (sessionId: SessionId) => void;
+  setNotifications: (notifications: TaggedNotification[]) => void;
   /** Sync notifications from session data (non-monitored sessions with needs_attention). */
-  syncFromRepositories: (repositories: SelectedRepository[]) => void;
+  syncFromRepositories: (repositories: SyncableRepository[]) => void;
 }
 
 /** Extract all sessions from a repository tree. */
-function flattenSessions(repos: SelectedRepository[]): CLISession[] {
-  const sessions: CLISession[] = [];
+function flattenSessions(repos: SyncableRepository[]): Array<{ id: SessionId; needs_attention?: string | null; last_activity_at: string }> {
+  const sessions: Array<{ id: SessionId; needs_attention?: string | null; last_activity_at: string }> = [];
   for (const repo of repos) {
     for (const wt of repo.worktrees ?? []) {
       for (const s of wt.sessions ?? []) {
@@ -32,9 +55,10 @@ export const useNotificationsStore = create<NotificationsState>((set, get) => ({
 
   addNotification: (notification) =>
     set((state) => {
-      if (state._trackedSessionIds.has(notification.session_id)) return state;
+      const sid = notification.session_id;
+      if (state._trackedSessionIds.has(sid)) return state;
       const tracked = new Set(state._trackedSessionIds);
-      tracked.add(notification.session_id);
+      tracked.add(sid);
       return {
         notifications: [notification, ...state.notifications],
         _trackedSessionIds: tracked,

@@ -1,3 +1,4 @@
+import { SessionId } from '@/types/session';
 import React, { useEffect, useState } from 'react';
 import { useSessionsStore } from '@/store/sessions';
 import { useProvidersStore } from '@/store/providers';
@@ -23,8 +24,9 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
   const repositories = useSessionsStore((s) => s.repositories);
   const selectedRepositoryPath = useSessionsStore((s) => s.selectedRepositoryPath);
   const addRepository = useSessionsStore((s) => s.addRepository);
-  const fetchRepositories = useSessionsStore((s) => s.fetchRepositories);
+  const refreshSessions = useSessionsStore((s) => s.refreshSessions);
   const selectSession = useSessionsStore((s) => s.selectSession);
+  const revealSession = useSessionsStore((s) => s.revealSession);
   const { providers, fetchProviders } = useProvidersStore();
 
   useEffect(() => {
@@ -47,7 +49,6 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
   const [worktreeRepoPath, setWorktreeRepoPath] = useState<string>('');
   const [worktreeConfigIndex, setWorktreeConfigIndex] = useState<number | null>(null);
   const [launching, setLaunching] = useState(false);
-  const [launchSuccess, setLaunchSuccess] = useState(false);
   const [addRepoIndex, setAddRepoIndex] = useState<number | null>(null);
   const [newRepoPath, setNewRepoPath] = useState('');
   const [addingRepo, setAddingRepo] = useState(false);
@@ -115,57 +116,27 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
   const handleLaunch = async () => {
     setLaunching(true);
     try {
-      // Snapshot existing session IDs before launch so we can detect the new one
-      const existingIds = new Set(
-        repositories.flatMap((r) =>
-          (r.worktrees ?? []).flatMap((wt) => (wt.sessions ?? []).map((s) => s.id)),
-        ),
-      );
+      let lastSessionId: SessionId | null = null;
 
-      for (const config of configs) {
-        if (!config.repoPath) continue;
+      for (const config of validConfigs) {
         let prompt = config.prompt.trim();
         if (config.attachedFiles.length > 0) {
           const fileList = config.attachedFiles.map((f) => `- ${f}`).join('\n');
-          const prefix = `Please read and consider these files:\n${fileList}\n\n`;
-          prompt = prefix + prompt;
+          prompt = `Please read and consider these files:\n${fileList}\n\n` + prompt;
         }
-        await api.terminal.launch({
-          command: config.provider,
-          project_path: config.repoPath,
-          prompt: prompt || undefined,
-        });
+
+        // Create the session file immediately — it appears in the tree right away.
+        // When the user opens the terminal, EmbeddedTerminal resumes it with --resume.
+        const resp = await api.sessions.createPending(config.repoPath, prompt);
+        lastSessionId = SessionId.wrap(resp.session_id, 0);
       }
 
-      // Poll for the new session to appear (up to 15s)
-      const launchedPaths = new Set(validConfigs.map((c) => c.repoPath));
-      const deadline = Date.now() + 15000;
-      let found: string | null = null;
-      while (Date.now() < deadline && !found) {
-        await new Promise((r) => setTimeout(r, 1000));
-        await fetchRepositories();
-        const repos = useSessionsStore.getState().repositories;
-        for (const repo of repos) {
-          for (const wt of repo.worktrees ?? []) {
-            if (!launchedPaths.has(wt.path) && !launchedPaths.has(repo.path)) continue;
-            for (const session of wt.sessions ?? []) {
-              if (!existingIds.has(session.id)) {
-                found = session.id;
-                break;
-              }
-            }
-            if (found) break;
-          }
-          if (found) break;
-        }
-      }
-
-      if (found) {
-        selectSession(found);
+      if (lastSessionId) {
+        // Fetch the updated session list so the store reflects the new session
+        await refreshSessions();
+        selectSession(lastSessionId);
+        revealSession(lastSessionId);
         onLaunched?.();
-      } else {
-        setLaunchSuccess(true);
-        setTimeout(() => setLaunchSuccess(false), 4000);
       }
     } finally {
       setLaunching(false);
@@ -184,11 +155,6 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
         </p>
       </div>
 
-      {launchSuccess && (
-        <div className="launch-success-banner">
-          Session{validConfigs.length !== 1 ? 's' : ''} launched — select from the sidebar to view the terminal.
-        </div>
-      )}
 
       {/* Session Configurations */}
       <div className="launch-section">
@@ -289,21 +255,21 @@ export const MultiSessionLaunchView: React.FC<MultiSessionLaunchViewProps> = ({ 
                   </div>
                 </div>
 
-                {/* Prompt textarea */}
+                {/* Context textarea */}
                 <div className="config-field">
-                  <label>Prompt</label>
+                  <label>Context</label>
                   <textarea
                     className="config-textarea"
-                    placeholder="Describe the task for the agent..."
+                    placeholder="Provide context for the session (optional)..."
                     value={config.prompt}
                     onChange={(e) => updateConfig(index, { prompt: e.target.value })}
                     rows={3}
                   />
                 </div>
 
-                {/* Attached files */}
+                {/* Context files */}
                 <div className="config-field">
-                  <label>Attach Files</label>
+                  <label>Context Files</label>
                   <div className="attached-files">
                     {config.attachedFiles.map((filePath, fileIdx) => (
                       <div key={fileIdx} className="attached-file-chip">

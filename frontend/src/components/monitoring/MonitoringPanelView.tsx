@@ -1,3 +1,4 @@
+import { SessionId } from '@/types/session';
 import React, { useState, useMemo, useCallback } from 'react';
 import type { CLISession } from '@/types/generated';
 import { useSessionsStore } from '@/store/sessions';
@@ -5,11 +6,9 @@ import { MonitoringCardView } from './MonitoringCardView';
 
 type LayoutMode = 'single' | 'list' | '2-col' | '3-col';
 
-interface SidePanelState {
-  visible: boolean;
-  action: string;
-  sessionId: string;
-}
+type SidePanelState =
+  | { visible: false }
+  | { visible: true; action: string; sessionId: SessionId };
 
 /**
  * Resolve grid column template based on layout mode.
@@ -32,7 +31,7 @@ function gridColumns(layout: LayoutMode): string {
  */
 function findSession(
   repositories: ReturnType<typeof useSessionsStore.getState>['repositories'],
-  sessionId: string,
+  sessionId: SessionId,
 ): CLISession | undefined {
   for (const repo of repositories) {
     for (const wt of repo.worktrees ?? []) {
@@ -49,11 +48,7 @@ export const MonitoringPanelView: React.FC = () => {
   const stopMonitoring = useSessionsStore((s) => s.stopMonitoring);
 
   const [layout, setLayout] = useState<LayoutMode>('2-col');
-  const [sidePanel, setSidePanel] = useState<SidePanelState>({
-    visible: false,
-    action: '',
-    sessionId: '',
-  });
+  const [sidePanel, setSidePanel] = useState<SidePanelState>({ visible: false });
 
   const monitoredIds = useMemo(() => Array.from(monitoredSessionIds), [monitoredSessionIds]);
 
@@ -72,7 +67,7 @@ export const MonitoringPanelView: React.FC = () => {
   }, [monitoredIds, repositories]);
 
   const handleCardAction = useCallback(
-    (action: string, sessionId: string) => {
+    (action: string, sessionId: SessionId) => {
       if (action === 'maximize') {
         // Switch to single layout focused on this card
         setLayout('single');
@@ -86,7 +81,7 @@ export const MonitoringPanelView: React.FC = () => {
       if (action === 'refresh') {
         // Trigger a state refresh for this session (via stop + re-start monitoring)
         // For now just close the side panel if open
-        setSidePanel((prev) => (prev.sessionId === sessionId ? { ...prev, visible: false } : prev));
+        setSidePanel((prev) => (prev.visible && prev.sessionId === sessionId ? { visible: false } : prev));
       }
     },
     [],

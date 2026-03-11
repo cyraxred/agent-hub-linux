@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -63,6 +65,20 @@ class RefreshResponse(BaseModel):
 
     success: bool = True
     message: str = ""
+
+
+class CreatePendingSessionRequest(BaseModel):
+    """Request body for creating a pre-seeded pending session."""
+
+    project_path: str
+    prompt: str = ""
+
+
+class CreatePendingSessionResponse(BaseModel):
+    """Response after creating a pending session file."""
+
+    session_id: str
+    session_file_path: str
 
 
 class SessionNameRequest(BaseModel):
@@ -529,3 +545,72 @@ async def get_session_plan(
             )
 
     return PlanResponse(session_id=session_id)
+
+
+@router.post("/create-pending", response_model=CreatePendingSessionResponse)
+async def create_pending_session(
+    body: CreatePendingSessionRequest,
+    request: Request,
+) -> CreatePendingSessionResponse:
+    """Create a pre-seeded session JSONL file with a pending user message.
+
+    This allows a new session to appear in the repository tree immediately,
+    before Claude has started or responded.  The caller can then resume the
+    session via ``--resume <session_id>`` and Claude will respond to the
+    pending message.
+    """
+    from agent_hub.services.path_utils import encode_project_path, get_claude_projects_dir
+
+    prov = _get_provider(request)
+    session_id = str(uuid.uuid4())
+    msg_uuid = str(uuid.uuid4())
+    now = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+    project_path = str(Path(body.project_path).resolve())
+    encoded = encode_project_path(project_path)
+    projects_dir = get_claude_projects_dir(prov.settings.claude_data_path)
+    session_dir = projects_dir / encoded
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session_file = session_dir / f"{session_id}.jsonl"
+
+    snapshot_entry = {
+        "type": "file-history-snapshot",
+        "messageId": msg_uuid,
+        "snapshot": {
+            "messageId": msg_uuid,
+            "trackedFileBackups": {},
+            "timestamp": now,
+        },
+        "isSnapshotUpdate": False,
+    }
+    user_entry = {
+        "parentUuid": None,
+        "isSidechain": False,
+        "userType": "external",
+        "cwd": project_path,
+        "sessionId": session_id,
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": body.prompt or "No context",
+        },
+        "uuid": msg_uuid,
+        "timestamp": now,
+        "todos": [],
+        "permissionMode": "default",
+    }
+
+    with open(session_file, "w") as f:
+        f.write(json.dumps(snapshot_entry) + "\n")
+        f.write(json.dumps(user_entry) + "\n")
+
+    # Refresh session list so the new file is discovered immediately
+    try:
+        await prov.claude_monitor.refresh_sessions()
+    except Exception:
+        logger.exception("Failed to refresh sessions after creating pending session")
+
+    return CreatePendingSessionResponse(
+        session_id=session_id,
+        session_file_path=str(session_file),
+    )

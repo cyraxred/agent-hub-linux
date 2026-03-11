@@ -6,6 +6,8 @@ import { useHostsStore } from '@/store/hosts';
 import { RepositoryTreeView } from '@/components/sessions/RepositoryTreeView';
 import { ProviderSegmentedControl } from '@/components/sessions/ProviderSegmentedControl';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
+import { SessionId } from '@/types/session';
+import { type TaggedSession } from '@/store/sessions';
 import type { CLISession } from '@/types/generated';
 
 const TIMEOUT_OPTIONS = [0, 3, 5, 10, 15, 30] as const;
@@ -14,11 +16,11 @@ interface SidebarProps {
   collapsed: boolean;
   sessionData: {
     repositories: import('@/types/generated').SelectedRepository[];
-    allSessions: CLISession[];
-    monitoredSessionIds: Set<string>;
+    allSessions: TaggedSession[];
+    monitoredSessionIds: Set<SessionId>;
     sessionStates: Record<string, import('@/types/generated').SessionMonitorState>;
     selectedRepositoryPath: string | null;
-    selectedSessionId: string | null;
+    selectedSessionId: SessionId | null;
     activeProvider: string;
     loading: boolean;
     selectRepository: (path: string | null) => void;

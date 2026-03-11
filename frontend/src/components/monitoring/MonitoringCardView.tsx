@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import type { CLISession, SessionMonitorState, ActivityEntry } from '@/types/generated';
+import { SessionId } from "@/types/session";
 import { useSessionsStore } from '@/store/sessions';
 import { ContextWindowBar } from './ContextWindowBar';
 import { EmbeddedTerminal } from '../terminal/EmbeddedTerminal';
@@ -7,9 +8,9 @@ import { EmbeddedTerminal } from '../terminal/EmbeddedTerminal';
 type CardMode = 'monitor' | 'terminal';
 
 interface MonitoringCardViewProps {
-  sessionId: string;
+  sessionId: SessionId;
   session: CLISession;
-  onAction?: (action: string, sessionId: string) => void;
+  onAction?: (action: string, sessionId: SessionId) => void;
 }
 
 /**

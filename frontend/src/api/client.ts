@@ -17,6 +17,7 @@ import type {
   SessionMonitorState,
   SessionSearchResult,
 } from '@/types/generated';
+import { SessionId } from '@/types/session';
 
 // ---------------------------------------------------------------------------
 // Base fetch helpers
@@ -214,6 +215,10 @@ interface GitRootResp {
   path: string;
   git_root: string;
 }
+interface CreatePendingSessionResp {
+  session_id: string;
+  session_file_path: string;
+}
 
 // ---------------------------------------------------------------------------
 // Host connect/disconnect request types (frontend-defined, not generated)
@@ -266,57 +271,62 @@ function buildApiClient(base: string) {
         const r = await g<SessionListResp>(`/sessions${qs({ provider })}`);
         return r.sessions ?? [];
       },
-      get: async (id: string, provider = 'claude'): Promise<SessionGetResp> =>
-        g<SessionGetResp>(`/sessions/${encodeURIComponent(id)}${qs({ provider })}`),
-      getState: async (id: string, provider = 'claude'): Promise<SessionMonitorState | null> => {
+      get: async (id: SessionId, provider = 'claude'): Promise<SessionGetResp> =>
+        g<SessionGetResp>(`/sessions/${encodeURIComponent(SessionId.rawId(id))}${qs({ provider })}`),
+      getState: async (id: SessionId, provider = 'claude'): Promise<SessionMonitorState | null> => {
         const r = await g<MonitorStateResp>(
-          `/sessions/${encodeURIComponent(id)}/state${qs({ provider })}`,
+          `/sessions/${encodeURIComponent(SessionId.rawId(id))}/state${qs({ provider })}`,
         );
         return r.state ?? null;
       },
       startMonitoring: async (
-        id: string,
+        id: SessionId,
         projectPath: string,
         sessionFilePath?: string,
         provider = 'claude',
       ): Promise<MonitorStateResp> =>
-        p<MonitorStateResp>(`/sessions/${encodeURIComponent(id)}/monitor`, {
+        p<MonitorStateResp>(`/sessions/${encodeURIComponent(SessionId.rawId(id))}/monitor`, {
           project_path: projectPath,
           session_file_path: sessionFilePath,
           provider,
         }),
-      stopMonitoring: async (id: string, provider = 'claude'): Promise<void> => {
-        await d(`/sessions/${encodeURIComponent(id)}/monitor${qs({ provider })}`);
+      stopMonitoring: async (id: SessionId, provider = 'claude'): Promise<void> => {
+        await d(`/sessions/${encodeURIComponent(SessionId.rawId(id))}/monitor${qs({ provider })}`);
       },
-      refreshState: async (id: string, provider = 'claude'): Promise<SessionMonitorState | null> => {
+      refreshState: async (id: SessionId, provider = 'claude'): Promise<SessionMonitorState | null> => {
         const r = await p<MonitorStateResp>(
-          `/sessions/${encodeURIComponent(id)}/refresh${qs({ provider })}`,
+          `/sessions/${encodeURIComponent(SessionId.rawId(id))}/refresh${qs({ provider })}`,
         );
         return r.state ?? null;
       },
       refreshAll: async (provider?: string): Promise<void> => {
         await p(`/repositories/refresh${qs({ provider: provider ?? '' })}`);
       },
+      createPending: async (projectPath: string, prompt: string): Promise<CreatePendingSessionResp> =>
+        p<CreatePendingSessionResp>('/sessions/create-pending', {
+          project_path: projectPath,
+          prompt,
+        }),
       getAllNames: async (): Promise<Record<string, string>> => {
         const r = await g<{ names: Record<string, string> }>('/sessions/names/all');
         return r.names ?? {};
       },
-      setName: async (sessionId: string, name: string | null): Promise<void> => {
-        await pu(`/sessions/${encodeURIComponent(sessionId)}/name`, { name });
+      setName: async (sessionId: SessionId, name: string | null): Promise<void> => {
+        await pu(`/sessions/${encodeURIComponent(SessionId.rawId(sessionId))}/name`, { name });
       },
       history: async (
-        sessionId: string,
+        sessionId: SessionId,
         offset = 0,
         limit = 50,
       ): Promise<SessionHistoryResp> =>
         g<SessionHistoryResp>(
-          `/sessions/${encodeURIComponent(sessionId)}/history${qs({ offset, limit })}`,
+          `/sessions/${encodeURIComponent(SessionId.rawId(sessionId))}/history${qs({ offset, limit })}`,
         ),
       plan: async (
-        sessionId: string,
+        sessionId: SessionId,
       ): Promise<{ plan_file_path: string | null; plan_content: string | null }> =>
         g<{ session_id: string; plan_file_path: string | null; plan_content: string | null }>(
-          `/sessions/${encodeURIComponent(sessionId)}/plan`,
+          `/sessions/${encodeURIComponent(SessionId.rawId(sessionId))}/plan`,
         ),
     },
 

@@ -1,14 +1,16 @@
 import { create } from 'zustand';
-import type { SelectedRepository, SessionMonitorState, SessionHistoryEntry } from '@/types/generated';
+import type { CLISession, SelectedRepository, SessionMonitorState, SessionHistoryEntry, WorktreeBranch } from '@/types/generated';
 import { api, createApiForHost } from '@/api/client';
 import { useNotificationsStore } from '@/store/notifications';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
+import { SessionId } from '@/types/session';
+import { useHostsStore } from '@/store/hosts';
 
 type Provider = string;
 
 /** Lightweight pub/sub for streaming history entries from WS to SessionHistoryView. */
 type HistoryAppendListener = (
-  sessionId: string,
+  sessionId: SessionId,
   entries: SessionHistoryEntry[],
   totalLines: number,
 ) => void;
@@ -21,7 +23,7 @@ class HistoryAppendBus {
     return () => this.listeners.delete(listener);
   }
 
-  notify(sessionId: string, entries: SessionHistoryEntry[], totalLines: number) {
+  notify(sessionId: SessionId, entries: SessionHistoryEntry[], totalLines: number) {
     for (const listener of this.listeners) {
       listener(sessionId, entries, totalLines);
     }
@@ -30,9 +32,20 @@ class HistoryAppendBus {
 
 export const historyAppendBus = new HistoryAppendBus();
 
-/** Repository annotated with which host it lives on. */
-export interface HostedRepository extends SelectedRepository {
+/** A session whose `id` has been scoped to its host via {@link SessionId}. */
+export interface TaggedSession extends Omit<CLISession, 'id'> {
+  id: SessionId;
+}
+
+/** A worktree branch whose sessions have been tagged with a host-scoped ID. */
+export interface TaggedWorktreeBranch extends Omit<WorktreeBranch, 'sessions'> {
+  sessions?: TaggedSession[];
+}
+
+/** Repository annotated with which host it lives on; sessions carry {@link SessionId}s. */
+export interface HostedRepository extends Omit<SelectedRepository, 'worktrees'> {
   host_id: string;
+  worktrees?: TaggedWorktreeBranch[];
 }
 
 interface SessionsState {
@@ -43,11 +56,11 @@ interface SessionsState {
   /** Session states keyed by session ID (from WS session_state_update). */
   sessionStates: Record<string, SessionMonitorState>;
   /** Session IDs currently being monitored. */
-  monitoredSessionIds: Set<string>;
+  monitoredSessionIds: Set<SessionId>;
   /** Subscription info for monitored sessions. */
   monitoredSessionInfo: Record<string, { projectPath: string; sessionFilePath: string; hostId: string }>;
 
-  selectedSessionId: string | null;
+  selectedSessionId: SessionId | null;
   selectedRepositoryPath: string | null;
   activeProvider: Provider;
   loading: boolean;
@@ -55,7 +68,7 @@ interface SessionsState {
   /** User-assigned custom names for sessions (session_id -> name). */
   customSessionNames: Record<string, string>;
   /** Session ID to reveal/focus in the sidebar tree (cleared after handling). */
-  revealSessionId: string | null;
+  revealSessionId: SessionId | null;
 
   // Actions
   fetchRepositories: (provider?: Provider) => Promise<void>;
@@ -63,26 +76,26 @@ interface SessionsState {
   addRepository: (path: string, provider?: Provider, hostId?: string) => Promise<void>;
   removeRepository: (path: string, provider?: Provider) => Promise<void>;
   selectRepository: (path: string | null) => void;
-  selectSession: (id: string | null) => void;
+  selectSession: (id: SessionId | null) => void;
   setActiveProvider: (provider: Provider) => void;
   refreshSessions: () => Promise<void>;
-  revealSession: (id: string) => void;
+  revealSession: (id: SessionId) => void;
   clearReveal: () => void;
   startMonitoring: (
-    sessionId: string,
+    sessionId: SessionId,
     projectPath: string,
     sessionFilePath?: string,
   ) => Promise<void>;
-  stopMonitoring: (sessionId: string) => Promise<void>;
-  refreshSessionState: (sessionId: string) => Promise<void>;
+  stopMonitoring: (sessionId: SessionId) => Promise<void>;
+  refreshSessionState: (sessionId: SessionId) => Promise<void>;
 
   /** Load persisted custom names from backend. */
   loadSessionNames: () => Promise<void>;
   /** Set or clear a custom name for a session (persists to backend). */
-  setSessionName: (sessionId: string, name: string | null) => void;
+  setSessionName: (sessionId: SessionId, name: string | null) => void;
 
   /** Called by WS hook when session_state_update arrives. */
-  setSessionState: (sessionId: string, state: SessionMonitorState) => void;
+  setSessionState: (sessionId: SessionId, state: SessionMonitorState) => void;
   /** Called by WS hook when sessions_updated arrives (legacy — routes to setHostRepositories). */
   setRepositories: (repos: SelectedRepository[]) => void;
   /** Called by WS hook when sessions_updated arrives for a specific host. */
@@ -93,7 +106,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   repositories: [],
   _reposByHost: {},
   sessionStates: {},
-  monitoredSessionIds: new Set(),
+  monitoredSessionIds: new Set<SessionId>(),
   monitoredSessionInfo: {},
   selectedSessionId: null,
   selectedRepositoryPath: null,
@@ -107,7 +120,17 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const repos = await api.repositories.list(provider ?? get().activeProvider);
-      const tagged: HostedRepository[] = repos.map((r) => ({ ...r, host_id: LOCALHOST_HOST_ID }));
+      const tagged: HostedRepository[] = repos.map((r) => ({
+        ...r,
+        host_id: LOCALHOST_HOST_ID,
+        worktrees: (r.worktrees ?? []).map((wt): TaggedWorktreeBranch => ({
+          ...wt,
+          sessions: (wt.sessions ?? []).map((s): TaggedSession => ({
+            ...s,
+            id: SessionId.wrap(s.id, 0),
+          })),
+        })),
+      }));
       const reposByHost = { ...get()._reposByHost, [LOCALHOST_HOST_ID]: tagged };
       const merged = (Object.values(reposByHost) as HostedRepository[][]).flat();
       set({ repositories: merged, _reposByHost: reposByHost, loading: false });
@@ -125,17 +148,33 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const tagged: HostedRepository[] = localRepos.map((r) => ({
         ...r,
         host_id: LOCALHOST_HOST_ID,
+        worktrees: (r.worktrees ?? []).map((wt): TaggedWorktreeBranch => ({
+          ...wt,
+          sessions: (wt.sessions ?? []).map((s): TaggedSession => ({
+            ...s,
+            id: SessionId.wrap(s.id, 0),
+          })),
+        })),
       }));
       const reposByHost: Record<string, HostedRepository[]> = { [LOCALHOST_HOST_ID]: tagged };
 
       // Fetch from each connected remote host
-      const { useHostsStore } = await import('@/store/hosts');
       const hostsState = useHostsStore.getState();
       for (const host of hostsState.hosts) {
         if (!hostsState.isConnected(host.id)) continue;
         try {
           const remoteRepos = await createApiForHost(host.id).repositories.list(prov);
-          reposByHost[host.id] = remoteRepos.map((r) => ({ ...r, host_id: host.id }));
+          reposByHost[host.id] = remoteRepos.map((r) => ({
+            ...r,
+            host_id: host.id,
+            worktrees: (r.worktrees ?? []).map((wt): TaggedWorktreeBranch => ({
+              ...wt,
+              sessions: (wt.sessions ?? []).map((s): TaggedSession => ({
+                ...s,
+                id: SessionId.wrap(s.id, host.hostSeq),
+              })),
+            })),
+          }));
         } catch {
           // Remote fetch failed — keep existing repos for that host
           if (get()._reposByHost[host.id]) {
@@ -208,6 +247,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const hostId = (repo as HostedRepository | undefined)?.host_id ?? LOCALHOST_HOST_ID;
       const apiClient = hostId === LOCALHOST_HOST_ID ? api : createApiForHost(hostId);
 
+      // Pass the full SessionId — the API client extracts rawId internally
       const resp = await apiClient.sessions.startMonitoring(
         sessionId,
         projectPath,
@@ -231,7 +271,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   stopMonitoring: async (sessionId) => {
     set({ error: null });
     try {
-      await api.sessions.stopMonitoring(sessionId, get().activeProvider);
+      const hostId = get().monitoredSessionInfo[sessionId]?.hostId ?? LOCALHOST_HOST_ID;
+      const apiClient = hostId === LOCALHOST_HOST_ID ? api : createApiForHost(hostId);
+      await apiClient.sessions.stopMonitoring(sessionId, get().activeProvider);
       set((s) => {
         const ids = new Set(s.monitoredSessionIds);
         ids.delete(sessionId);
@@ -248,7 +290,9 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   refreshSessionState: async (sessionId) => {
     set({ error: null });
     try {
-      const state = await api.sessions.refreshState(sessionId, get().activeProvider);
+      const hostId = get().monitoredSessionInfo[sessionId]?.hostId ?? LOCALHOST_HOST_ID;
+      const apiClient = hostId === LOCALHOST_HOST_ID ? api : createApiForHost(hostId);
+      const state = await apiClient.sessions.refreshState(sessionId, get().activeProvider);
       if (state) {
         set((s) => ({
           sessionStates: { ...s.sessionStates, [sessionId]: state },
@@ -278,8 +322,12 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       }
       return { customSessionNames: names };
     });
-    // Persist to backend (fire-and-forget)
-    api.sessions.setName(sessionId, name).catch(() => {});
+    // Persist to backend (fire-and-forget) — route to the correct host
+    const hostId = get().repositories
+      .find((r) => (r.worktrees ?? []).some((wt) => (wt.sessions ?? []).some((s) => s.id === sessionId)))
+      ?.host_id ?? LOCALHOST_HOST_ID;
+    const apiClient = hostId === LOCALHOST_HOST_ID ? api : createApiForHost(hostId);
+    apiClient.sessions.setName(sessionId, name).catch(() => {});
   },
 
   setSessionState: (sessionId, state) => {
@@ -294,7 +342,20 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   },
 
   setHostRepositories: (hostId, repos) => {
-    const tagged: HostedRepository[] = repos.map((r) => ({ ...r, host_id: hostId }));
+    const hostSeq = hostId === LOCALHOST_HOST_ID
+      ? 0
+      : (useHostsStore.getState().hosts.find((h) => h.id === hostId)?.hostSeq ?? 0);
+    const tagged: HostedRepository[] = repos.map((r) => ({
+      ...r,
+      host_id: hostId,
+      worktrees: (r.worktrees ?? []).map((wt): TaggedWorktreeBranch => ({
+        ...wt,
+        sessions: (wt.sessions ?? []).map((s): TaggedSession => ({
+          ...s,
+          id: SessionId.wrap(s.id, hostSeq),
+        })),
+      })),
+    }));
     set((s) => {
       const reposByHost = { ...s._reposByHost, [hostId]: tagged };
       const merged = (Object.values(reposByHost) as HostedRepository[][]).flat();

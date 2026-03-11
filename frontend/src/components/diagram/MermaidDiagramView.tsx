@@ -1,10 +1,11 @@
+import { SessionId } from '@/types/session';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import mermaid from 'mermaid';
 import { api } from '@/api/client';
 import type { MermaidDiagramInfo, SessionMonitorState } from '@/types/generated';
 
 interface MermaidDiagramViewProps {
-  sessionId: string;
+  sessionId: SessionId;
 }
 
 const DIAGRAM_TYPES = [

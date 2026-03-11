@@ -1,10 +1,10 @@
 import React from 'react';
-import type { CLISession } from '@/types/generated';
-import { useSessionsStore } from '@/store/sessions';
+import { useSessionsStore, type TaggedSession } from '@/store/sessions';
+import { SessionId } from "@/types/session";
 import { SessionRow } from './SessionRow';
 
 interface SessionsListViewProps {
-  sessions: CLISession[];
+  sessions: TaggedSession[];
   header?: string;
 }
 

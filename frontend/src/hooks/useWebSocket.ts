@@ -6,7 +6,14 @@ import { useStatsStore } from '@/store/stats';
 import { useNotificationsStore } from '@/store/notifications';
 import { historyAppendBus } from '@/store/sessions';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
+import { SessionId } from '@/types/session';
 import type { ServerMessage } from '@/types/generated';
+
+/** Resolve the numeric host seq for a string host ID (0 = localhost). */
+function hostSeqFor(hostId: string): number {
+  if (hostId === LOCALHOST_HOST_ID) return 0;
+  return useHostsStore.getState().hosts.find((h) => h.id === hostId)?.hostSeq ?? 0;
+}
 
 export function useWebSocket() {
   const [connected, setConnected] = useState(wsClient.connected);
@@ -22,16 +29,18 @@ export function useWebSocket() {
 
   const handleMessage = useCallback(
     (message: ServerMessage, hostId: string) => {
+      const seq = hostSeqFor(hostId);
       switch (message.kind) {
         case 'session_state_update': {
-          setSessionState(message.session_id, message.state);
+          const sid = SessionId.wrap(message.session_id, seq);
+          setSessionState(sid, message.state);
           const statusKind = message.state?.status?.kind;
           if (
             statusKind &&
             statusKind !== 'awaiting_approval' &&
             statusKind !== 'awaiting_question'
           ) {
-            resolveBySessionId(message.session_id);
+            resolveBySessionId(sid);
           }
           break;
         }
@@ -42,20 +51,32 @@ export function useWebSocket() {
           setStats(message.provider, message.stats);
           break;
         case 'session_history_append':
-          historyAppendBus.notify(message.session_id, message.entries, message.total_lines);
+          historyAppendBus.notify(
+            SessionId.wrap(message.session_id, seq),
+            message.entries,
+            message.total_lines,
+          );
           break;
         case 'terminal_output':
           break;
         case 'search_results':
           break;
         case 'notification':
-          addNotification(message.notification);
+          addNotification({
+            ...message.notification,
+            session_id: SessionId.wrap(message.notification.session_id, seq),
+          });
           break;
         case 'notification_resolved':
           resolveNotification(message.notification_id);
           break;
         case 'notification_list':
-          setNotifications(message.notifications ?? []);
+          setNotifications(
+            (message.notifications ?? []).map((n) => ({
+              ...n,
+              session_id: SessionId.wrap(n.session_id, seq),
+            })),
+          );
           break;
         case 'error':
           console.error('[WS] Server error:', message.message);
@@ -111,7 +132,7 @@ export function useWebSocket() {
     wsClient.subscribe(info);
   }, []);
 
-  const unsubscribe = useCallback((sessionId: string) => {
+  const unsubscribe = useCallback((sessionId: SessionId) => {
     wsClient.unsubscribe(sessionId);
   }, []);
 

@@ -1,3 +1,4 @@
+import { SessionId } from '@/types/session';
 import React, { useState } from 'react';
 import type { DiffComment } from '@/types/generated';
 import { api } from '@/api/client';
@@ -6,7 +7,7 @@ interface DiffCommentsPanelProps {
   comments: DiffComment[];
   filePath: string;
   onAddComment: (comment: DiffComment) => void;
-  sessionId?: string | null;
+  sessionId?: SessionId | null;
   onTerminalLaunched?: () => void;
   lineNumber?: string;
   onLineNumberChange?: (value: string) => void;
@@ -78,7 +79,7 @@ export const DiffCommentsPanel: React.FC<DiffCommentsPanelProps> = ({
     setSubmitting(true);
     try {
       await api.terminal.launch({
-        session_id: sessionId,
+        session_id: SessionId.rawId(sessionId),
         resume: true,
         prompt,
       });

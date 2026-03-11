@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import type { SelectedRepository, WorktreeBranch, CLISession } from '@/types/generated';
-import { useSessionsStore, type HostedRepository } from '@/store/sessions';
+import type { SelectedRepository, WorktreeBranch } from '@/types/generated';
+import { SessionId } from '@/types/session';
+import { useSessionsStore, type HostedRepository, type TaggedSession, type TaggedWorktreeBranch } from '@/store/sessions';
 import { useHostsStore, type ConnectionStatus } from '@/store/hosts';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
 import { api } from '@/api/client';
@@ -118,14 +119,14 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
   }, [revealSessionId, repositories, clearReveal]);
 
   const handleSessionClick = useCallback(
-    (session: CLISession) => {
+    (session: TaggedSession) => {
       selectSession(session.id);
     },
     [selectSession],
   );
 
   const handleSessionDoubleClick = useCallback(
-    (session: CLISession) => {
+    (session: TaggedSession) => {
       startMonitoring(session.id, session.project_path, session.session_file_path);
     },
     [startMonitoring],
@@ -170,7 +171,7 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
   // Apply text filter across repo names, worktree names, and session slugs/messages
   const lowerFilter = filter?.toLowerCase() ?? '';
 
-  function sessionMatchesFilter(session: CLISession): boolean {
+  function sessionMatchesFilter(session: TaggedSession): boolean {
     if (!lowerFilter) return true;
     return (
       (session.slug?.toLowerCase().includes(lowerFilter) ?? false) ||
@@ -180,13 +181,13 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
     );
   }
 
-  function worktreeMatchesFilter(wt: WorktreeBranch): boolean {
+  function worktreeMatchesFilter(wt: TaggedWorktreeBranch): boolean {
     if (!lowerFilter) return true;
     if (wt.name.toLowerCase().includes(lowerFilter)) return true;
     return (wt.sessions ?? []).some(sessionMatchesFilter);
   }
 
-  function repoMatchesFilter(repo: SelectedRepository): boolean {
+  function repoMatchesFilter(repo: HostedRepository): boolean {
     if (!lowerFilter) return true;
     if (repo.name.toLowerCase().includes(lowerFilter)) return true;
     if (repo.path.toLowerCase().includes(lowerFilter)) return true;
@@ -405,14 +406,14 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter }
 
 interface WorktreeNodeProps {
   worktree: WorktreeBranch;
-  sessions: CLISession[];
+  sessions: TaggedSession[];
   isExpanded: boolean;
   onToggle: () => void;
-  selectedSessionId: string | null;
+  selectedSessionId: SessionId | null;
   sessionStates: Record<string, import('@/types/generated').SessionMonitorState>;
-  monitoredSessionIds: Set<string>;
-  onSessionClick: (session: CLISession) => void;
-  onSessionDoubleClick: (session: CLISession) => void;
+  monitoredSessionIds: Set<SessionId>;
+  onSessionClick: (session: TaggedSession) => void;
+  onSessionDoubleClick: (session: TaggedSession) => void;
   onDeleteWorktree: (e: React.MouseEvent, worktreePath: string) => void;
   onStartSession: (e: React.MouseEvent, projectPath: string) => void;
 }

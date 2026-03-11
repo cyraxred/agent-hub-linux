@@ -43,7 +43,10 @@ export const useHostsStore = create<HostsState>()(
       runtimeState: {},
 
       addHost: (config) =>
-        set((s) => ({ hosts: [...s.hosts, config] })),
+        set((s) => {
+          const maxSeq = s.hosts.reduce((m, h) => Math.max(m, h.hostSeq ?? 0), 0);
+          return { hosts: [...s.hosts, { ...config, hostSeq: maxSeq + 1 }] };
+        }),
 
       updateHost: (id, changes) =>
         set((s) => ({

@@ -8,6 +8,11 @@ export interface HostConfig {
   id: string;
   label: string;
   kind: HostKind;
+  /**
+   * Sequential UI index used to scope session IDs.
+   * Localhost is implicitly 0; remote hosts get 1, 2, 3 … in the order they are added.
+   */
+  hostSeq: number;
   // direct
   baseUrl: string;        // e.g. "http://192.168.1.10:18080"
   // ssh
@@ -26,6 +31,7 @@ export const LOCALHOST_HOST_ID = '__local__';
 export function defaultHostConfig(): Omit<HostConfig, 'id' | 'label'> {
   return {
     kind: 'direct',
+    hostSeq: 0,
     baseUrl: 'http://192.168.1.10:18080',
     sshHost: '',
     sshPort: 22,

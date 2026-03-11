@@ -1,12 +1,13 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import type { DetailView } from '@/components/layout/AppLayout';
 import type { CLISession } from '@/types/generated';
+import { SessionId } from "@/types/session";
 import { useSessionsStore } from '@/store/sessions';
 import { MonitoringCardView } from './MonitoringCardView';
 import { SessionHistoryView } from './SessionHistoryView';
 
 interface SessionViewProps {
-  sessionId: string;
+  sessionId: SessionId;
   session: CLISession;
   onChangeView?: (view: DetailView) => void;
 }
@@ -44,7 +45,7 @@ export const SessionView: React.FC<SessionViewProps> = ({
   };
 
   const handleCardAction = useCallback(
-    (action: string, _sessionId: string) => {
+    (action: string, _sessionId: SessionId) => {
       if (action === 'refresh') {
         refreshSessionState?.(_sessionId);
         return;

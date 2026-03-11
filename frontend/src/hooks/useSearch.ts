@@ -1,3 +1,4 @@
+import { SessionId } from '@/types/session';
 import { useCallback } from 'react';
 import { useSearchStore } from '@/store/search';
 import { useSessionsStore } from '@/store/sessions';
@@ -29,7 +30,7 @@ export function useSearch() {
     if (!selected) return;
 
     // Select the session in the sessions store by its id
-    selectSession(selected.id);
+    selectSession(SessionId.local(selected.id));
 
     close();
   }, [getSelected, selectSession, close]);

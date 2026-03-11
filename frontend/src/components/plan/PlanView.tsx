@@ -1,10 +1,11 @@
+import { SessionId } from '@/types/session';
 import React, { useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { api } from '@/api/client';
 import type { PlanInfo, SessionMonitorState } from '@/types/generated';
 
 interface PlanViewProps {
-  sessionId: string;
+  sessionId: SessionId;
 }
 
 /** Format an ISO timestamp as "HH:MM MM/DD". */

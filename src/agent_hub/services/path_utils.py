@@ -57,9 +57,10 @@ def get_stats_cache_file(data_path: str) -> Path:
     return Path(data_path).expanduser() / "stats-cache.json"
 
 
-# A resumable session must contain at least one of these types, which indicate
-# that the assistant actually participated (not just user-only or metadata files).
-_RESUMABLE_TYPES = frozenset({"system", "assistant", "progress", "summary"})
+# A resumable session must contain at least one of these types.
+# "user" is included so that pre-seeded pending sessions (created before Claude
+# has responded) are discovered immediately in the repository tree.
+_RESUMABLE_TYPES = frozenset({"system", "assistant", "progress", "summary", "user"})
 
 # Cache: path -> is_conversation.  Files that are not conversations today could
 # become conversations if they're still being written to, so we only cache True

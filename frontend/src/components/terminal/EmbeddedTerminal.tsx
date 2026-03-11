@@ -1,3 +1,4 @@
+import { SessionId } from '@/types/session';
 import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -6,7 +7,7 @@ import { api } from '@/api/client';
 import '@xterm/xterm/css/xterm.css';
 
 interface EmbeddedTerminalProps {
-  sessionId: string;
+  sessionId: SessionId;
   projectPath: string;
 }
 
@@ -90,7 +91,7 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
     api.terminal
       .launch({
         project_path: projectPath,
-        session_id: sessionId,
+        session_id: SessionId.rawId(sessionId),
         resume: true,
       })
       .then((resp) => {
@@ -212,7 +213,7 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
       <div className="terminal-toolbar">
         <div className="terminal-toolbar-left">
           <span className="terminal-label">Terminal</span>
-          <span className="terminal-session-id">{sessionId.slice(0, 8)}</span>
+          <span className="terminal-session-id">{SessionId.rawId(sessionId).slice(0, 8)}</span>
         </div>
         <div className="terminal-toolbar-right">
           <button

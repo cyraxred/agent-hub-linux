@@ -80,6 +80,7 @@ export const HostsSettingsSection: React.FC = () => {
         id,
         label: form.label.trim(),
         kind: form.kind,
+        hostSeq: 0, // addHost() will override with the correct sequential value
         baseUrl: form.baseUrl.trim(),
         sshHost: form.sshHost.trim(),
         sshPort: parseInt(form.sshPort, 10) || 22,
