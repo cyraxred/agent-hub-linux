@@ -56,6 +56,11 @@ def _build_mock_provider() -> MagicMock:
     process_registry = MagicMock()
     provider.process_registry = process_registry
 
+    # Session manager
+    session_manager = MagicMock()
+    session_manager._schedule_notify = MagicMock()
+    provider.session_manager = session_manager
+
     return provider
 
 
@@ -98,7 +103,7 @@ class TestWebSocketConnection:
                 pass  # WebSocket disconnects on context exit
 
     def test_websocket_subscribe_session(self) -> None:
-        """Test sending a subscribe_session message."""
+        """Test sending a subscribe_session message starts monitoring."""
         provider = _build_mock_provider()
         app = _create_ws_test_app(provider)
 
@@ -112,15 +117,7 @@ class TestWebSocketConnection:
                 }
                 ws.send_text(json.dumps(msg))
 
-                # The handler should call start_monitoring and then
-                # broadcast the current state back to us.
-                # First message on connect is the notification list.
-                response = ws.receive_json()
-                if response["kind"] == "notification_list":
-                    response = ws.receive_json()
-                assert response["kind"] == "session_state_update"
-                assert response["session_id"] == "test-session-001"
-                assert "state" in response
+        provider.claude_watcher.start_monitoring.assert_called_once()
 
     def test_websocket_unsubscribe_session(self) -> None:
         """Test sending an unsubscribe_session message."""
@@ -137,10 +134,6 @@ class TestWebSocketConnection:
                     "session_file_path": "/home/user/.claude/projects/x/test-session-001.jsonl",
                 }
                 ws.send_text(json.dumps(subscribe_msg))
-                # Consume the notification list and state update
-                resp = ws.receive_json()
-                if resp["kind"] == "notification_list":
-                    ws.receive_json()
 
                 # Then unsubscribe
                 unsub_msg = {
@@ -159,8 +152,6 @@ class TestWebSocketConnection:
             with client.websocket_connect("/ws") as ws:
                 ws.send_text("not valid json at all {{{")
                 response = ws.receive_json()
-                if response["kind"] == "notification_list":
-                    response = ws.receive_json()
                 assert response["kind"] == "error"
                 assert "Invalid message" in response["message"]
 
@@ -174,8 +165,6 @@ class TestWebSocketConnection:
                 msg = {"kind": "totally_unknown_kind"}
                 ws.send_text(json.dumps(msg))
                 response = ws.receive_json()
-                if response["kind"] == "notification_list":
-                    response = ws.receive_json()
                 assert response["kind"] == "error"
 
     def test_websocket_refresh_sessions(self) -> None:
@@ -190,8 +179,6 @@ class TestWebSocketConnection:
 
                 # After refresh, the handler broadcasts sessions_updated
                 response = ws.receive_json()
-                if response["kind"] == "notification_list":
-                    response = ws.receive_json()
                 assert response["kind"] == "sessions_updated"
                 assert "repositories" in response
 
@@ -209,7 +196,6 @@ class TestWebSocketConnection:
                     "session_file_path": "/home/user/.claude/projects/x/sess-abc.jsonl",
                 }
                 ws.send_text(json.dumps(msg))
-                ws.receive_json()
 
         provider.claude_watcher.start_monitoring.assert_called_once_with(
             session_id="sess-abc",

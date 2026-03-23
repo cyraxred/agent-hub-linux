@@ -12,7 +12,6 @@ from agent_hub.services.path_utils import get_history_file
 
 logger = logging.getLogger(__name__)
 
-_ACTIVE_THRESHOLD_SECONDS = 60.0
 
 from typing import Callable
 
@@ -146,10 +145,8 @@ class CodexSessionMonitorService:
                     session_id = sf.stem
                     try:
                         mtime = sf.stat().st_mtime
-                        is_active = (now.timestamp() - mtime) < _ACTIVE_THRESHOLD_SECONDS
                     except OSError:
                         mtime = now.timestamp()
-                        is_active = False
 
                     history = next(
                         (h for h in self._history_entries if h.session_id == session_id),
@@ -163,7 +160,6 @@ class CodexSessionMonitorService:
                             id=session_id,
                             project_path=repo_path,
                             last_activity_at=datetime.fromtimestamp(mtime, tz=timezone.utc),
-                            is_active=is_active,
                             first_message=history.display if history else "",
                             session_file_path=str(sf),
                         )

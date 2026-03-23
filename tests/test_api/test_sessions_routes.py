@@ -21,13 +21,11 @@ from agent_hub.models.session import CLISession, SelectedRepository, WorktreeBra
 def _make_session(
     session_id: str = "sess-001",
     project_path: str = "/home/user/project",
-    is_active: bool = True,
 ) -> CLISession:
     return CLISession(
         id=session_id,
         project_path=project_path,
         last_activity_at=datetime(2025, 6, 15, 10, 0, tzinfo=timezone.utc),
-        is_active=is_active,
         first_message="Hello",
     )
 

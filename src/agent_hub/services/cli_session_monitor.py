@@ -15,7 +15,6 @@ from agent_hub.models.session import (
 )
 from agent_hub.services.metadata_store import MetadataStore
 from agent_hub.services.path_utils import (
-    detect_needs_attention,
     encode_project_path,
     find_session_files,
     get_claude_projects_dir,
@@ -26,8 +25,6 @@ from agent_hub.services.session_jsonl_parser import parse_session_head
 
 logger = logging.getLogger(__name__)
 
-# Activity threshold: if file mtime < 60 seconds ago, session is active
-_ACTIVE_THRESHOLD_SECONDS = 60.0
 
 from typing import Callable
 
@@ -151,19 +148,7 @@ class CLISessionMonitorService:
 
         projects_dir = get_claude_projects_dir(self._claude_path)
 
-        # Build lookup of previous sessions to avoid re-reading unchanged files
-        previous_sessions: dict[str, CLISession] | None = None
-        existing_repo = next((r for r in self._repositories if r.path == repo_path), None)
-        if existing_repo is not None:
-            previous_sessions = {
-                s.id: s
-                for wt in existing_repo.worktrees
-                for s in wt.sessions
-            }
-
-        sessions = await self._find_sessions_for_path(
-            repo_path, projects_dir, previous_sessions
-        )
+        sessions = await self._find_sessions_for_path(repo_path, projects_dir)
 
         # Detect worktrees
         worktrees: list[WorktreeBranch] = []
@@ -192,7 +177,6 @@ class CLISessionMonitorService:
         self,
         repo_path: str,
         projects_dir: Path,
-        previous_sessions: dict[str, CLISession] | None = None,
     ) -> list[CLISession]:
         """Find all sessions for a given repository path."""
         sessions: list[CLISession] = []
@@ -206,14 +190,11 @@ class CLISessionMonitorService:
                 session_id = session_id_from_path(session_file)
                 now = datetime.now(tz=timezone.utc)
 
-                # Check if active (mtime within threshold)
                 mtime = 0.0
                 try:
                     mtime = session_file.stat().st_mtime
-                    elapsed = now.timestamp() - mtime
-                    is_active = elapsed < _ACTIVE_THRESHOLD_SECONDS
                 except OSError:
-                    is_active = False
+                    pass
 
                 # Parse head for slug and branch
                 head_info = parse_session_head(str(session_file))
@@ -224,14 +205,6 @@ class CLISessionMonitorService:
                     None,
                 )
 
-                # Check if agent needs user attention.
-                # If file hasn't changed since last scan, carry forward previous result.
-                prev = previous_sessions.get(session_id) if previous_sessions else None
-                if prev is not None and prev.last_activity_at.timestamp() == mtime:
-                    attention = prev.needs_attention
-                else:
-                    attention = detect_needs_attention(session_file)
-
                 session = CLISession(
                     id=session_id,
                     project_path=repo_path,
@@ -240,12 +213,9 @@ class CLISessionMonitorService:
                     last_activity_at=datetime.fromtimestamp(mtime, tz=timezone.utc)
                     if mtime
                     else now,
-                    message_count=0,
-                    is_active=is_active,
                     first_message=history.display if history else "",
                     slug=head_info.get("slug", ""),
                     session_file_path=str(session_file),
-                    needs_attention=attention,
                 )
                 sessions.append(session)
 

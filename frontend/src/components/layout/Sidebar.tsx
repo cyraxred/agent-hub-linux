@@ -1,15 +1,12 @@
 import React, { useState } from 'react';
-import { useSessionsStore } from '@/store/sessions';
+import { useSessionsStore, type TaggedSession } from '@/store/sessions';
 import { useHiddenSessionsStore } from '@/store/hiddenSessions';
 import { useSettingsStore } from '@/store/settings';
-import { useNotificationsStore } from '@/store/notifications';
 import { useHostsStore } from '@/store/hosts';
 import { RepositoryTreeView } from '@/components/sessions/RepositoryTreeView';
 import { ProviderSegmentedControl } from '@/components/sessions/ProviderSegmentedControl';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
 import { SessionId } from '@/types/session';
-import { type TaggedSession } from '@/store/sessions';
-import type { CLISession } from '@/types/generated';
 
 const TIMEOUT_OPTIONS = [0, 3, 5, 10, 15, 30] as const;
 
@@ -46,7 +43,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
   const { settings, updateSettings, saveSettings } = useSettingsStore();
   const hosts = useHostsStore((s) => s.hosts);
   const isConnected = useHostsStore((s) => s.isConnected);
-  const notifications = useNotificationsStore((s) => s.notifications);
+  const sessionUpdates = useSessionsStore((s) => s.sessionUpdates);
   const approvalTimeout = (settings.approval_timeout_seconds as number) ?? 10;
 
   const [showAddRepo, setShowAddRepo] = useState(false);
@@ -103,49 +100,56 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
     );
   }
 
-  // Count running sessions (those with an active monitor state that is not idle)
+  // Count running sessions — use process_pid from sessionUpdates as source of truth
   const runningSessions = allSessions.filter((s) => {
-    if (!monitoredSessionIds.has(s.id)) return s.is_active;
-    const state = sessionStates[s.id];
-    return state?.status && state.status.kind !== 'idle';
+    return sessionUpdates[s.id]?.process_pid != null;
   });
 
   return (
     <aside className="sidebar">
-      {notifications.length > 0 && (
-        <div className="sidebar-section sidebar-attention">
-          <div className="sidebar-section-header">
-            <h3>Attention</h3>
-            <span className="badge badge-warning">{notifications.length}</span>
+      {(() => {
+        const attentionSessions = allSessions.filter(
+          (s) => sessionUpdates[s.id]?.needs_attention,
+        );
+        if (attentionSessions.length === 0) return null;
+        return (
+          <div className="sidebar-section sidebar-attention">
+            <div className="sidebar-section-header">
+              <h3>Attention</h3>
+              <span className="badge badge-warning">{attentionSessions.length}</span>
+            </div>
+            <div className="sidebar-attention-list">
+              {attentionSessions.map((s) => {
+                const update = sessionUpdates[s.id]!;
+                return (
+                  <button
+                    key={s.id}
+                    className={`sidebar-attention-item ${
+                      selectedSessionId === s.id ? 'active' : ''
+                    }`}
+                    onClick={() => selectSession(s.id)}
+                    title={
+                      update.effective_status === 'awaiting_question'
+                        ? 'Waiting for your answer'
+                        : 'Needs approval'
+                    }
+                  >
+                    <span className={`status-dot status-${update.effective_status}`} />
+                    <span className="attention-session-id">
+                      {s.slug ?? s.id.slice(0, 12)}
+                    </span>
+                    <span className="attention-detail">
+                      {update.effective_status === 'awaiting_question'
+                        ? 'Input needed'
+                        : 'Approval'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-          <div className="sidebar-attention-list">
-            {notifications.map((notif) => (
-              <button
-                key={notif.id}
-                className={`sidebar-attention-item ${
-                  selectedSessionId === notif.session_id ? 'active' : ''
-                }`}
-                onClick={() => selectSession(notif.session_id)}
-                title={
-                  notif.attention_kind === 'awaiting_question'
-                    ? 'Waiting for your answer'
-                    : `Needs approval for ${notif.tool_name}`
-                }
-              >
-                <span className={`status-dot status-${notif.attention_kind}`} />
-                <span className="attention-session-id">
-                  {notif.session_id.slice(0, 12)}
-                </span>
-                <span className="attention-detail">
-                  {notif.attention_kind === 'awaiting_question'
-                    ? 'Input needed'
-                    : notif.tool_name || 'Approval'}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       <div className="sidebar-section">
         <div className="sidebar-section-header">
@@ -287,38 +291,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ collapsed, sessionData }) => {
           <RepositoryTreeView filter={filterText} showHidden={showHidden} recentOnly={recentOnly} />
         )}
       </div>
-
-      {/* Monitored Sessions Panel */}
-      {monitoredSessionIds.size > 0 && (
-        <div className="sidebar-section">
-          <div className="sidebar-section-header">
-            <h3>Monitored</h3>
-            <span className="badge">{monitoredSessionIds.size}</span>
-          </div>
-          <div className="sidebar-monitored-list">
-            {Array.from(monitoredSessionIds).map((sessionId) => {
-              const state = sessionStates[sessionId];
-              const statusKind = state?.status?.kind ?? 'idle';
-              return (
-                <button
-                  key={sessionId}
-                  className={`sidebar-monitored-item ${
-                    selectedSessionId === sessionId ? 'active' : ''
-                  }`}
-                  onClick={() => selectSession(sessionId)}
-                  title={sessionId}
-                >
-                  <span className={`status-dot status-${statusKind}`} />
-                  <span className="monitored-session-id">
-                    {sessionId.slice(0, 12)}
-                  </span>
-                  <span className="monitored-session-status">{statusKind}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       <div className="sidebar-footer">
         <div className="sidebar-stats">

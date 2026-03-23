@@ -3,9 +3,6 @@ import { wsClient, wsManager, type SubscriptionInfo } from '@/api/websocket';
 import { useSessionsStore } from '@/store/sessions';
 import { useHostsStore } from '@/store/hosts';
 import { useStatsStore } from '@/store/stats';
-import { useNotificationsStore } from '@/store/notifications';
-// NOTE: notification WS messages are now superseded by session_update,
-// but we keep backward-compat handlers for old backends.
 import { historyAppendBus } from '@/store/sessions';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
 import { SessionId } from '@/types/session';
@@ -22,10 +19,6 @@ export function useWebSocket() {
   const setSessionState = useSessionsStore((s) => s.setSessionState);
   const setHostRepositories = useSessionsStore((s) => s.setHostRepositories);
   const setStats = useStatsStore((s) => s.setStats);
-  const addNotification = useNotificationsStore((s) => s.addNotification);
-  const resolveNotification = useNotificationsStore((s) => s.resolveNotification);
-  const resolveBySessionId = useNotificationsStore((s) => s.resolveBySessionId);
-  const setNotifications = useNotificationsStore((s) => s.setNotifications);
   const connectedHostIds = useHostsStore((s) => s.connectedHostIds);
   const initialized = useRef(false);
 
@@ -33,19 +26,6 @@ export function useWebSocket() {
     (message: ServerMessage, hostId: string) => {
       const seq = hostSeqFor(hostId);
       switch (message.kind) {
-        case 'session_state_update': {
-          const sid = SessionId.wrap(message.session_id, seq);
-          setSessionState(sid, message.state);
-          const statusKind = message.state?.status?.kind;
-          if (
-            statusKind &&
-            statusKind !== 'awaiting_approval' &&
-            statusKind !== 'awaiting_question'
-          ) {
-            resolveBySessionId(sid);
-          }
-          break;
-        }
         case 'sessions_updated':
           setHostRepositories(hostId, message.repositories ?? []);
           break;
@@ -66,32 +46,11 @@ export function useWebSocket() {
           if (message.monitor_state) {
             setSessionState(sid, message.monitor_state);
           }
-          // Auto-resolve notifications when attention clears
-          if (!message.needs_attention) {
-            resolveBySessionId(sid);
-          }
           break;
         }
         case 'terminal_output':
           break;
         case 'search_results':
-          break;
-        case 'notification':
-          addNotification({
-            ...message.notification,
-            session_id: SessionId.wrap(message.notification.session_id, seq),
-          });
-          break;
-        case 'notification_resolved':
-          resolveNotification(message.notification_id);
-          break;
-        case 'notification_list':
-          setNotifications(
-            (message.notifications ?? []).map((n) => ({
-              ...n,
-              session_id: SessionId.wrap(n.session_id, seq),
-            })),
-          );
           break;
         case 'error':
           console.error('[WS] Server error:', message.message);
@@ -104,10 +63,6 @@ export function useWebSocket() {
       setSessionState,
       setHostRepositories,
       setStats,
-      addNotification,
-      resolveNotification,
-      resolveBySessionId,
-      setNotifications,
     ],
   );
 

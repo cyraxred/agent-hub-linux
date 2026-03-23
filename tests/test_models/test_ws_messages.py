@@ -22,7 +22,6 @@ from agent_hub.models.ws_messages import (
     ServerMessageError,
     ServerMessageSearchResults,
     ServerMessageSessionsUpdated,
-    ServerMessageSessionStateUpdate,
     ServerMessageStatsUpdated,
     ServerMessageTerminalOutput,
 )
@@ -33,15 +32,6 @@ from agent_hub.models.ws_messages import (
 
 class TestServerMessages:
     """Tests for all ServerMessage discriminated union variants."""
-
-    def test_session_state_update(self) -> None:
-        state = SessionMonitorState()
-        msg = ServerMessageSessionStateUpdate(
-            session_id="sess-001",
-            state=state,
-        )
-        assert msg.kind == "session_state_update"
-        assert msg.session_id == "sess-001"
 
     def test_sessions_updated(self) -> None:
         msg = ServerMessageSessionsUpdated(repositories=[])
@@ -73,11 +63,6 @@ class TestServerMessages:
     def test_server_message_discriminated_union(self) -> None:
         adapter = TypeAdapter(ServerMessage)
         variants = [
-            {
-                "kind": "session_state_update",
-                "session_id": "s1",
-                "state": SessionMonitorState().model_dump(),
-            },
             {"kind": "sessions_updated", "repositories": []},
             {
                 "kind": "stats_updated",

@@ -132,8 +132,7 @@ export const MonitoringCardView: React.FC<MonitoringCardViewProps> = ({
   const stopMonitoring = useSessionsStore((s) => s.stopMonitoring);
   const [mode, setMode] = useState<CardMode>('monitor');
 
-  const isConnectable = sessionUpdate?.is_connectable ?? false;
-  const isResumable = sessionUpdate?.is_resumable ?? true;
+  const isConnectable = sessionUpdate?.is_connectable ?? true;
 
   const dotColor = getStatusDotColor(state);
   const pulse = shouldPulse(state);
@@ -176,10 +175,10 @@ export const MonitoringCardView: React.FC<MonitoringCardViewProps> = ({
           className="btn-ghost btn"
           style={{ padding: '2px 6px', fontSize: 'var(--font-size-xs)' }}
           onClick={() => setMode(mode === 'monitor' ? 'terminal' : 'monitor')}
-          disabled={mode === 'monitor' && !isConnectable && !isResumable}
+          disabled={mode === 'monitor' && !isConnectable}
           title={
             mode === 'monitor'
-              ? (!isConnectable && !isResumable
+              ? (!isConnectable
                 ? 'Terminal not available — session has a running process that cannot be connected to'
                 : 'Switch to terminal')
               : 'Switch to monitor'

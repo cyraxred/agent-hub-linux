@@ -23,7 +23,9 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
   const wsRef = useRef<WebSocket | null>(null);
   const [error, setError] = useState<string | null>(null);
   const sessionUpdate = useSessionsStore((s) => s.sessionUpdates[sessionId]);
-  const cannotConnect = !!(sessionUpdate && sessionUpdate.is_active && !sessionUpdate.is_connectable && !sessionUpdate.is_resumable);
+  // Block only when SessionManager explicitly says not connectable.
+  // No sessionUpdate yet = allow (backend will 409 if needed).
+  const cannotConnect = sessionUpdate ? !sessionUpdate.is_connectable : false;
 
   useEffect(() => {
     if (!terminalRef.current || cannotConnect) return;

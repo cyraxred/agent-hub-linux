@@ -13,9 +13,7 @@ export const SessionsListView: React.FC<SessionsListViewProps> = ({
   header,
 }) => {
   const selectedSessionId = useSessionsStore((s) => s.selectedSessionId);
-  const sessionStates = useSessionsStore((s) => s.sessionStates);
   const sessionUpdates = useSessionsStore((s) => s.sessionUpdates);
-  const monitoredSessionIds = useSessionsStore((s) => s.monitoredSessionIds);
   const selectSession = useSessionsStore((s) => s.selectSession);
   const startMonitoring = useSessionsStore((s) => s.startMonitoring);
 
@@ -40,8 +38,6 @@ export const SessionsListView: React.FC<SessionsListViewProps> = ({
             key={session.id}
             session={session}
             isSelected={selectedSessionId === session.id}
-            isMonitored={monitoredSessionIds.has(session.id)}
-            monitorState={sessionStates[session.id]}
             sessionUpdate={sessionUpdates[session.id]}
             onClick={() => selectSession(session.id)}
             onDoubleClick={() =>

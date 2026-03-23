@@ -10,29 +10,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from agent_hub.models.monitor_state import SessionMonitorState
 from agent_hub.models.process_info import ClaudeProcessCategory, ClaudeProcessInfo
+
+if TYPE_CHECKING:
+    from agent_hub.services.claude_process_tracker import ClaudeProcessTracker
 
 logger = logging.getLogger(__name__)
 
 # Debounce: at most one broadcast per session per this interval.
 _DEBOUNCE_SECONDS = 0.2
-
-
-@dataclass
-class _AttentionEntry:
-    """Mirrors the tracker's attention entry for unified state."""
-
-    session_id: str
-    tool_use_id: str
-    tool_name: str
-    attention_kind: str  # "awaiting_approval" | "awaiting_question"
-    ts: float = 0
 
 
 @dataclass
@@ -49,52 +40,71 @@ class Session:
     branch_name: str = ""
     monitor_state: SessionMonitorState | None = None
     process: ClaudeProcessInfo | None = None
-    pending_attention: list[_AttentionEntry] = field(default_factory=list)
-    terminal_key: str | None = None
 
     # -- Computed properties --
+    #
+    # These flags are the authoritative session state sent to the frontend
+    # via the ``session_update`` WS message.  They drive badge rendering,
+    # terminal launch guards, and attention indicators.
+    #
+    # State matrix:
+    #
+    #   process        | is_running | is_connectable
+    #   ---------------+------------+---------------
+    #   None (idle)    |   False    |     True       (resume)
+    #   hub / tmux     |   True     |     True       (attach)
+    #   user / 3rd_pty |   True     |     False      (blocked)
+    #
+    # ``is_running`` is internal only (not sent to the frontend).
+    # ``is_connectable`` is the single flag the UI needs for the terminal
+    # button.  The backend decides resume vs attach in the launch endpoint.
+    #
+    # Attention state (``needs_attention``, ``effective_status``) is owned
+    # exclusively by the ProcessTracker and queried via SessionManager
+    # methods — not stored on Session.
 
     @property
-    def is_active(self) -> bool:
-        """True when a live process owns this session."""
+    def is_running(self) -> bool:
+        """A ``claude`` OS process is alive and mapped to this session.
+
+        Determined by the process tracker scanning ``/proc`` and correlating
+        PIDs with entries in ``~/.claude/agent-hub/sessions.jsonl``.
+
+        Internal only — not sent to the frontend.  The frontend derives
+        "running" from ``process_pid is not None`` if it ever needs it.
+        """
         return self.process is not None
 
     @property
     def is_connectable(self) -> bool:
-        """True when active and the process category allows terminal attach."""
+        """Whether a terminal can be opened for this session.
+
+        True in two cases:
+        - No process running → safe to ``claude --resume``.
+        - Process running with ``hub`` or ``tmux`` category →
+          backend will attach to the existing process.
+
+        False when:
+        - A ``user`` or ``third_party`` process is running (no multiplexer).
+
+        This is the single flag the UI needs for the terminal button.
+        """
         if self.process is None:
-            return False
+            return True
         return self.process.category in (
             ClaudeProcessCategory.hub,
             ClaudeProcessCategory.tmux,
         )
 
     @property
-    def is_resumable(self) -> bool:
-        """True when no live process owns this session (safe to --resume)."""
-        return self.process is None
-
-    @property
-    def needs_attention(self) -> bool:
-        return len(self.pending_attention) > 0
-
-    @property
     def is_monitored(self) -> bool:
-        return self.monitor_state is not None
+        """A file watcher is actively parsing this session's JSONL.
 
-    @property
-    def effective_status(self) -> str:
-        """Derive a single status string for the UI.
-
-        Priority: attention > monitor status > active > idle.
+        Provides live token counts, activity history, tool calls, etc.
+        Monitoring starts automatically when the session detail view opens
+        and stops when it closes.
         """
-        if self.pending_attention:
-            return self.pending_attention[-1].attention_kind
-        if self.monitor_state and self.monitor_state.status:
-            return self.monitor_state.status.kind
-        if self.is_active:
-            return "active"
-        return "idle"
+        return self.monitor_state is not None
 
 
 class SessionManager:
@@ -104,6 +114,10 @@ class SessionManager:
     registered on the process tracker, file watchers, session monitors,
     and terminal routes.  After each mutation the registered update
     callbacks are fired (debounced per session).
+
+    Attention state is owned exclusively by the ProcessTracker.
+    This manager queries it on demand via ``get_needs_attention`` and
+    ``get_effective_status`` — no local copy is kept.
     """
 
     def __init__(self) -> None:
@@ -131,6 +145,39 @@ class SessionManager:
     def get_all_sessions(self) -> list[Session]:
         return list(self._sessions.values())
 
+    def get_needs_attention(self, session_id: str) -> bool:
+        """Whether the session has pending attention events.
+
+        Queries the ProcessTracker directly — no local copy.
+        """
+        session = self._sessions.get(session_id)
+        if session is None or not session.is_running or self._tracker is None:
+            return False
+        return len(self._tracker.get_pending_attention_for_session(session_id)) > 0
+
+    def get_effective_status(self, session_id: str) -> str:
+        """Single status string for the UI.
+
+        Priority: attention > monitor status > running > idle.
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            return "idle"
+        if self.get_needs_attention(session_id):
+            entries = self._tracker.get_pending_attention_for_session(session_id)
+            return entries[-1].attention_kind if entries else "idle"
+        if session.monitor_state and session.monitor_state.status:
+            return session.monitor_state.status.kind
+        if session.is_running:
+            return "running"
+        return "idle"
+
+    def get_pending_attention(self, session_id: str) -> list:
+        """Return pending attention entries from the tracker."""
+        if self._tracker is None:
+            return []
+        return self._tracker.get_pending_attention_for_session(session_id)
+
     # ------------------------------------------------------------------
     # Mutation entry points
     # ------------------------------------------------------------------
@@ -146,6 +193,7 @@ class SessionManager:
         async with self._lock:
             states = self._tracker.get_all_process_states()
             changed_ids: set[str] = set()
+            now = datetime.now(tz=timezone.utc)
 
             # Update sessions that have a process
             seen_session_ids: set[str] = set()
@@ -157,58 +205,30 @@ class SessionManager:
                     self._sessions[sid] = session
                 if session.process != ps.process:
                     session.process = ps.process
+                    session.last_activity_at = now
                     changed_ids.add(sid)
 
-            # Clear process for sessions that are no longer tracked
+            # Clear process for sessions no longer tracked
             for sid, session in self._sessions.items():
                 if sid not in seen_session_ids and session.process is not None:
                     session.process = None
+                    session.last_activity_at = now
                     changed_ids.add(sid)
 
             for sid in changed_ids:
                 self._schedule_notify(sid)
 
-    async def handle_attention(self, entry: object) -> None:
-        """Called by process tracker on_attention."""
-        session_id: str = entry.session_id  # type: ignore[attr-defined]
-        tool_use_id: str = entry.tool_use_id  # type: ignore[attr-defined]
-        tool_name: str = entry.tool_name  # type: ignore[attr-defined]
-        attention_kind: str = entry.attention_kind  # type: ignore[attr-defined]
-        ts: float = getattr(entry, "ts", 0)
+    async def handle_attention_changed(self, session_id: str) -> None:
+        """Called when the tracker fires an attention or attention-resolved callback.
 
+        We don't store any attention data — just trigger a broadcast so
+        the WS handler can query the tracker for the current state.
+        """
         async with self._lock:
             session = self._sessions.get(session_id)
-            if session is None:
-                session = Session(session_id=session_id)
-                self._sessions[session_id] = session
-
-            # Deduplicate by tool_use_id
-            if any(a.tool_use_id == tool_use_id for a in session.pending_attention):
-                return
-
-            session.pending_attention.append(
-                _AttentionEntry(
-                    session_id=session_id,
-                    tool_use_id=tool_use_id,
-                    tool_name=tool_name,
-                    attention_kind=attention_kind,
-                    ts=ts,
-                )
-            )
+            if session is not None:
+                session.last_activity_at = datetime.now(tz=timezone.utc)
             self._schedule_notify(session_id)
-
-    async def handle_attention_resolved(self, session_id: str, tool_use_id: str) -> None:
-        """Called by process tracker on_attention_resolved or file watcher on_tool_result."""
-        async with self._lock:
-            session = self._sessions.get(session_id)
-            if session is None:
-                return
-            before = len(session.pending_attention)
-            session.pending_attention = [
-                a for a in session.pending_attention if a.tool_use_id != tool_use_id
-            ]
-            if len(session.pending_attention) != before:
-                self._schedule_notify(session_id)
 
     async def handle_monitor_state_update(
         self, session_id: str, state: SessionMonitorState
@@ -220,6 +240,8 @@ class SessionManager:
                 session = Session(session_id=session_id)
                 self._sessions[session_id] = session
             session.monitor_state = state
+            if state.last_activity_at:
+                session.last_activity_at = state.last_activity_at
             self._schedule_notify(session_id)
 
     async def handle_monitor_stopped(self, session_id: str) -> None:
@@ -231,23 +253,21 @@ class SessionManager:
             session.monitor_state = None
             self._schedule_notify(session_id)
 
-    async def handle_terminal_registered(self, session_id: str, key: str) -> None:
-        """Called after terminal launch."""
+    async def handle_terminal_registered(self, session_id: str) -> None:
+        """Called after terminal launch. Triggers a broadcast."""
         async with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 session = Session(session_id=session_id)
                 self._sessions[session_id] = session
-            session.terminal_key = key
             self._schedule_notify(session_id)
 
     async def handle_terminal_unregistered(self, session_id: str) -> None:
-        """Called after terminal terminate."""
+        """Called after terminal terminate. Triggers a broadcast."""
         async with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 return
-            session.terminal_key = None
             self._schedule_notify(session_id)
 
     async def sync_discovered_sessions(
@@ -262,10 +282,8 @@ class SessionManager:
         without overwriting live process/monitor data.
         """
         async with self._lock:
-            seen: set[str] = set()
             for d in discovered:
                 sid = d.id  # type: ignore[attr-defined]
-                seen.add(sid)
                 session = self._sessions.get(sid)
                 if session is None:
                     session = Session(session_id=sid)
@@ -289,9 +307,9 @@ class SessionManager:
     # Tracker reference (set during wiring)
     # ------------------------------------------------------------------
 
-    _tracker: object | None = None
+    _tracker: ClaudeProcessTracker | None = None
 
-    def set_tracker(self, tracker: object) -> None:
+    def set_tracker(self, tracker: ClaudeProcessTracker) -> None:
         self._tracker = tracker
 
     # ------------------------------------------------------------------

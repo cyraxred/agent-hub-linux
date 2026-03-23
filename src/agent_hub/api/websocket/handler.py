@@ -9,14 +9,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from agent_hub.models.monitor_state import SessionMonitorState
 from agent_hub.models.search import SessionSearchResult
 from agent_hub.models.session import SelectedRepository
 from agent_hub.models.stats import GlobalStatsCache
@@ -30,19 +28,13 @@ from agent_hub.models.ws_messages import (
     ClientMessageUnsubscribeSession,
     SessionHistoryEntry,
     ServerMessageError,
-    ServerMessageNotification,
-    ServerMessageNotificationList,
-    ServerMessageNotificationResolved,
-    ServerMessageProcessStateUpdate,
     ServerMessageSearchResults,
     ServerMessageSessionHistoryAppend,
     ServerMessageSessionsUpdated,
-    ServerMessageSessionStateUpdate,
     ServerMessageSessionUpdate,
     ServerMessageStatsUpdated,
     ServerMessageTerminalOutput,
 )
-from agent_hub.services.notification_service import notify_attention_needed
 from agent_hub.services.terminal_launcher import resize_terminal
 
 logger = logging.getLogger(__name__)
@@ -52,15 +44,9 @@ class ConnectionManager:
     """Manages WebSocket connections and broadcasts server messages."""
 
     def __init__(self) -> None:
-        # All active connections
         self._connections: list[WebSocket] = []
-        # Per-connection session subscriptions: ws -> set of session_ids
         self._subscriptions: dict[int, set[str]] = {}
         self._lock = asyncio.Lock()
-        # Notification tracking
-        self._notifications: dict[str, AttentionNotification] = {}
-        # Map "session_id:tool_use_id" -> notification_id (for resolving)
-        self._session_notification: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Connection lifecycle
@@ -142,36 +128,21 @@ class ConnectionManager:
     # High-level broadcast helpers
     # ------------------------------------------------------------------
 
-    async def broadcast_session_state(
-        self, session_id: str, state: SessionMonitorState
-    ) -> None:
-        """Broadcast a ``session_state_update`` to subscribers."""
-        msg = ServerMessageSessionStateUpdate(
-            session_id=session_id,
-            state=state,
-        )
-        await self.broadcast_to_subscribers(
-            session_id, msg.model_dump(mode="json")
-        )
-
     async def broadcast_sessions_updated(
         self, repositories: list[SelectedRepository]
     ) -> None:
-        """Broadcast a ``sessions_updated`` to all clients."""
         msg = ServerMessageSessionsUpdated(repositories=repositories)
         await self.broadcast(msg.model_dump(mode="json"))
 
     async def broadcast_stats_updated(
         self, provider: str, stats: GlobalStatsCache
     ) -> None:
-        """Broadcast a ``stats_updated`` to all clients."""
         msg = ServerMessageStatsUpdated(provider=provider, stats=stats)
         await self.broadcast(msg.model_dump(mode="json"))
 
     async def broadcast_search_results(
         self, results: list[SessionSearchResult]
     ) -> None:
-        """Broadcast ``search_results`` to all clients."""
         msg = ServerMessageSearchResults(results=results)
         await self.broadcast(msg.model_dump(mode="json"))
 
@@ -181,7 +152,6 @@ class ConnectionManager:
         entries: list[dict[str, object]],
         total_lines: int,
     ) -> None:
-        """Broadcast new raw JSONL entries to subscribers."""
         msg = ServerMessageSessionHistoryAppend(
             session_id=session_id,
             entries=[
@@ -201,101 +171,11 @@ class ConnectionManager:
     async def broadcast_terminal_output(
         self, session_key: str, data: str
     ) -> None:
-        """Broadcast ``terminal_output`` to all clients."""
         msg = ServerMessageTerminalOutput(session_key=session_key, data=data)
         await self.broadcast(msg.model_dump(mode="json"))
 
-    async def broadcast_process_state_update(
-        self, process_states: dict, unmatched_processes: list,
-    ) -> None:
-        """Broadcast a ``process_state_update`` to all clients."""
-        msg = ServerMessageProcessStateUpdate(
-            process_states=process_states,
-            unmatched_processes=unmatched_processes,
-        )
-        await self.broadcast(msg.model_dump(mode="json"))
-
     async def send_error(self, ws: WebSocket, message: str) -> None:
-        """Send an ``error`` message to a single client."""
         msg = ServerMessageError(message=message)
-        await self._safe_send(ws, msg.model_dump(mode="json"))
-
-    # ------------------------------------------------------------------
-    # Notification helpers (driven by process tracker attention events)
-    # ------------------------------------------------------------------
-
-    @property
-    def active_notifications(self) -> list[AttentionNotification]:
-        """Return all unresolved notifications."""
-        return list(self._notifications.values())
-
-    async def handle_attention(self, entry: object) -> None:
-        """Handle a new attention event from the process tracker.
-
-        ``entry`` is a ``_AttentionEntry`` dataclass from the tracker.
-        """
-        session_id: str = entry.session_id  # type: ignore[attr-access]
-        tool_name: str = entry.tool_name  # type: ignore[attr-access]
-        tool_use_id: str = entry.tool_use_id  # type: ignore[attr-access]
-        attention_kind: str = entry.attention_kind  # type: ignore[attr-access]
-
-        # Deduplicate — one notification per (session, tool_use_id)
-        dedup_key = f"{session_id}:{tool_use_id}"
-        if dedup_key in self._session_notification:
-            return
-
-        notif_id = str(uuid.uuid4())
-        notification = AttentionNotification(
-            id=notif_id,
-            session_id=session_id,
-            attention_kind=attention_kind,  # type: ignore[arg-type]
-            tool_name=tool_name,
-            timestamp=datetime.now(tz=timezone.utc),
-        )
-        self._notifications[notif_id] = notification
-        self._session_notification[dedup_key] = notif_id
-
-        msg = ServerMessageNotification(notification=notification)
-        await self.broadcast(msg.model_dump(mode="json"))
-
-        # Desktop notification (fire-and-forget)
-        asyncio.create_task(
-            notify_attention_needed(session_id, attention_kind, tool_name)
-        )
-
-    async def handle_attention_resolved(self, session_id: str, tool_use_id: str) -> None:
-        """Handle an attention event being resolved."""
-        dedup_key = f"{session_id}:{tool_use_id}"
-        notif_id = self._session_notification.pop(dedup_key, None)
-        if notif_id and notif_id in self._notifications:
-            del self._notifications[notif_id]
-            msg = ServerMessageNotificationResolved(
-                notification_id=notif_id,
-                session_id=session_id,
-            )
-            await self.broadcast(msg.model_dump(mode="json"))
-
-    async def handle_attention_resolved_for_session(self, session_id: str) -> None:
-        """Resolve all attention notifications for a session (e.g., PID died)."""
-        to_remove = [
-            (key, nid) for key, nid in self._session_notification.items()
-            if key.startswith(f"{session_id}:")
-        ]
-        for key, notif_id in to_remove:
-            del self._session_notification[key]
-            if notif_id in self._notifications:
-                del self._notifications[notif_id]
-                msg = ServerMessageNotificationResolved(
-                    notification_id=notif_id,
-                    session_id=session_id,
-                )
-                await self.broadcast(msg.model_dump(mode="json"))
-
-    async def send_notification_list(self, ws: WebSocket) -> None:
-        """Send the current notification list to a newly connected client."""
-        msg = ServerMessageNotificationList(
-            notifications=self.active_notifications,
-        )
         await self._safe_send(ws, msg.model_dump(mode="json"))
 
 
@@ -311,47 +191,11 @@ manager = ConnectionManager()
 # ---------------------------------------------------------------------------
 
 
-async def _on_session_state_update(
-    session_id: str, state: SessionMonitorState
-) -> None:
-    """Callback invoked by file watchers when a session state changes."""
-    await manager.broadcast_session_state(session_id, state)
-
-
 async def _on_session_history_append(
     session_id: str, entries: list[dict[str, object]], total_lines: int
 ) -> None:
     """Callback invoked by file watchers when new JSONL entries are parsed."""
     await manager.broadcast_session_history_append(session_id, entries, total_lines)
-
-
-async def _on_attention_event(entry: object) -> None:
-    """Callback invoked by the process tracker when an attention event arrives."""
-    try:
-        await manager.handle_attention(entry)
-    except Exception:
-        logger.exception("Error handling attention event")
-
-
-async def _on_attention_resolved(session_id: str, tool_use_id: str) -> None:
-    """Callback invoked by the process tracker when attention is resolved."""
-    try:
-        await manager.handle_attention_resolved(session_id, tool_use_id)
-    except Exception:
-        logger.exception("Error handling attention resolved")
-
-
-async def _on_process_state_update() -> None:
-    """Callback invoked by the process tracker when state changes."""
-    try:
-        # Access the tracker via a simple import — it will be wired
-        # from the same provider that called register_provider_callbacks.
-        tracker = _on_process_state_update._tracker  # type: ignore[attr-defined]
-        states = tracker.get_all_process_states()
-        unmatched = tracker.get_unmatched_processes()
-        await manager.broadcast_process_state_update(states, unmatched)
-    except Exception:
-        logger.exception("Error broadcasting process state update")
 
 
 async def _on_claude_stats_update(stats: GlobalStatsCache | None) -> None:
@@ -364,40 +208,54 @@ async def _on_codex_stats_update(stats: GlobalStatsCache | None) -> None:
         await manager.broadcast_stats_updated("codex", stats)
 
 
+
+
+def _build_session_update_msg(
+    sm: Any, session_id: str,
+) -> ServerMessageSessionUpdate | None:
+    """Build a ``session_update`` message for a session, or None if unknown."""
+    from agent_hub.services.session_manager import Session  # noqa: F811
+
+    session = sm.get_session(session_id)
+    if session is None:
+        return None
+
+    needs_attention = sm.get_needs_attention(session_id)
+    effective_status = sm.get_effective_status(session_id)
+    pending = sm.get_pending_attention(session_id)
+
+    notifications: list[AttentionNotification] = []
+    for a in pending:
+        notifications.append(
+            AttentionNotification(
+                id=f"{a.session_id}:{a.tool_use_id}",
+                session_id=a.session_id,
+                attention_kind=a.attention_kind,  # type: ignore[arg-type]
+                tool_name=a.tool_name,
+                timestamp=datetime.fromtimestamp(a.ts, tz=timezone.utc) if a.ts else datetime.now(tz=timezone.utc),
+            )
+        )
+
+    return ServerMessageSessionUpdate(
+        session_id=session_id,
+        is_connectable=session.is_connectable,
+        needs_attention=needs_attention,
+        effective_status=effective_status,
+        last_activity_at=session.last_activity_at,
+        process_category=session.process.category if session.process else None,
+        process_pid=session.process.pid if session.process else None,
+        monitor_state=session.monitor_state,
+        notifications=notifications,
+    )
+
+
 async def _on_unified_session_update(session_id: str) -> None:
     """Broadcast a unified ``session_update`` from the SessionManager."""
     try:
         sm = _on_unified_session_update._provider.session_manager  # type: ignore[attr-defined]
-        session = sm.get_session(session_id)
-        if session is None:
-            return
-
-        notifications: list[AttentionNotification] = []
-        for a in session.pending_attention:
-            notifications.append(
-                AttentionNotification(
-                    id=f"{a.session_id}:{a.tool_use_id}",
-                    session_id=a.session_id,
-                    attention_kind=a.attention_kind,  # type: ignore[arg-type]
-                    tool_name=a.tool_name,
-                    timestamp=datetime.fromtimestamp(a.ts, tz=timezone.utc) if a.ts else datetime.now(tz=timezone.utc),
-                )
-            )
-
-        msg = ServerMessageSessionUpdate(
-            session_id=session_id,
-            is_active=session.is_active,
-            is_connectable=session.is_connectable,
-            is_resumable=session.is_resumable,
-            needs_attention=session.needs_attention,
-            effective_status=session.effective_status,
-            process_category=session.process.category if session.process else None,
-            process_pid=session.process.pid if session.process else None,
-            terminal_key=session.terminal_key,
-            monitor_state=session.monitor_state,
-            notifications=notifications,
-        )
-        await manager.broadcast(msg.model_dump(mode="json"))
+        msg = _build_session_update_msg(sm, session_id)
+        if msg is not None:
+            await manager.broadcast(msg.model_dump(mode="json"))
     except Exception:
         logger.exception("Error broadcasting unified session update for %s", session_id)
 
@@ -408,14 +266,14 @@ def register_provider_callbacks(provider: Any) -> None:
 
     Call this once during FastAPI app startup.
     """
-    # Session file watchers (kept for session_state_update + history append)
-    provider.claude_watcher.on_state_update(_on_session_state_update)
-    provider.codex_watcher.on_state_update(_on_session_state_update)
+    # Session file watchers — history append only (session_state_update
+    # is handled via SessionManager's unified path)
     provider.claude_watcher.on_history_append(_on_session_history_append)
     provider.codex_watcher.on_history_append(_on_session_history_append)
 
     # Wire transcript-based attention resolution: when a tool_result arrives
     # for a tool_use_id that has a pending attention entry, resolve it.
+    # The tracker fires its own resolved callbacks which trigger the broadcast.
     async def _on_tool_result(session_id: str, tool_use_id: str) -> None:
         try:
             provider.process_tracker.resolve_attention(session_id, tool_use_id)
@@ -425,34 +283,27 @@ def register_provider_callbacks(provider: Any) -> None:
     provider.claude_watcher.on_tool_result(_on_tool_result)
     provider.codex_watcher.on_tool_result(_on_tool_result)
 
-    # Process tracker (old paths remain for backward compat)
-    try:
-        _on_process_state_update._tracker = provider.process_tracker  # type: ignore[attr-defined]
-        provider.process_tracker.on_update(_on_process_state_update)
-        provider.process_tracker.on_attention(_on_attention_event)
-        provider.process_tracker.on_attention_resolved(_on_attention_resolved)
-    except AttributeError:
-        pass
-
     # --- SessionManager wiring ---
     try:
         sm = provider.session_manager
 
         # Process tracker -> SessionManager
         provider.process_tracker.on_update(sm.handle_process_update)
-        provider.process_tracker.on_attention(sm.handle_attention)
-        provider.process_tracker.on_attention_resolved(sm.handle_attention_resolved)
 
-        # File watchers -> SessionManager
+        # Attention callbacks — just trigger a broadcast, no data copy.
+        # The tracker owns the attention state; SessionManager queries it.
+        async def _on_attention(entry: object) -> None:
+            await sm.handle_attention_changed(entry.session_id)  # type: ignore[attr-defined]
+
+        async def _on_attention_resolved(session_id: str, tool_use_id: str) -> None:
+            await sm.handle_attention_changed(session_id)
+
+        provider.process_tracker.on_attention(_on_attention)
+        provider.process_tracker.on_attention_resolved(_on_attention_resolved)
+
+        # File watchers -> SessionManager (unified path only)
         provider.claude_watcher.on_state_update(sm.handle_monitor_state_update)
         provider.codex_watcher.on_state_update(sm.handle_monitor_state_update)
-
-        # Tool result resolution via SessionManager
-        async def _sm_tool_result(session_id: str, tool_use_id: str) -> None:
-            await sm.handle_attention_resolved(session_id, tool_use_id)
-
-        provider.claude_watcher.on_tool_result(_sm_tool_result)
-        provider.codex_watcher.on_tool_result(_sm_tool_result)
 
         # Session discovery -> SessionManager
         provider.claude_monitor.on_refresh(
@@ -482,8 +333,6 @@ def register_provider_callbacks(provider: Any) -> None:
     except AttributeError:
         pass
     try:
-        # CodexGlobalStatsService does not have a file-watcher callback,
-        # so this is a no-op if the method does not exist.
         provider.codex_stats_service.on_stats_update(_on_codex_stats_update)
     except AttributeError:
         pass
@@ -494,24 +343,32 @@ def register_provider_callbacks(provider: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def websocket_endpoint(ws: WebSocket) -> None:
-    """Main ``/ws`` endpoint handler.
+async def _send_initial_session_states(ws: WebSocket) -> None:
+    """Send session_update for all known sessions to a newly connected client."""
+    sm = ws.app.state.provider.session_manager
+    for session in sm.get_all_sessions():
+        msg = _build_session_update_msg(sm, session.session_id)
+        if msg is not None:
+            await manager._safe_send(ws, msg.model_dump(mode="json"))
 
-    Accepts a WebSocket connection and processes ``ClientMessage`` frames
-    until the connection is closed.
-    """
-    provider = ws.app.state.provider
+
+async def websocket_endpoint(ws: WebSocket) -> None:
+    """Main ``/ws`` endpoint handler."""
     await manager.connect(ws)
-    await manager.send_notification_list(ws)
+
+    # Send current session state for all known sessions so the frontend
+    # renders process/attention state immediately after connecting.
+    try:
+        await _send_initial_session_states(ws)
+    except Exception:
+        logger.debug("Could not send initial session states", exc_info=True)
 
     try:
         while True:
             raw = await ws.receive_text()
 
-            # Parse the incoming ClientMessage
             try:
                 data = json.loads(raw)
-                # Use Pydantic's discriminated-union parsing
                 from pydantic import TypeAdapter
                 adapter = TypeAdapter(ClientMessage)
                 message = adapter.validate_python(data)
@@ -519,21 +376,20 @@ async def websocket_endpoint(ws: WebSocket) -> None:
                 await manager.send_error(ws, f"Invalid message: {exc}")
                 continue
 
-            # Dispatch by message kind
             if isinstance(message, ClientMessageSubscribeSession):
-                await _handle_subscribe(ws, message, provider)
+                await _handle_subscribe(ws, message, ws.app.state.provider)
 
             elif isinstance(message, ClientMessageUnsubscribeSession):
-                await _handle_unsubscribe(ws, message, provider)
+                await _handle_unsubscribe(ws, message, ws.app.state.provider)
 
             elif isinstance(message, ClientMessageTerminalInput):
-                await _handle_terminal_input(message, provider)
+                await _handle_terminal_input(message, ws.app.state.provider)
 
             elif isinstance(message, ClientMessageTerminalResize):
-                await _handle_terminal_resize(message, provider)
+                await _handle_terminal_resize(message, ws.app.state.provider)
 
             elif isinstance(message, ClientMessageRefreshSessions):
-                await _handle_refresh_sessions(provider)
+                await _handle_refresh_sessions(ws.app.state.provider)
 
             else:
                 await manager.send_error(ws, f"Unknown message kind: {data.get('kind')}")
@@ -559,8 +415,6 @@ async def _handle_subscribe(
     """Subscribe to a session and start monitoring its file."""
     await manager.subscribe(ws, msg.session_id)
 
-    # Start monitoring via the appropriate watcher.
-    # We try Claude first; if the session file path hints at Codex we use that.
     watcher = provider.claude_watcher
     if msg.session_file_path and ".codex" in msg.session_file_path:
         watcher = provider.codex_watcher
@@ -576,10 +430,15 @@ async def _handle_subscribe(
         await manager.send_error(ws, f"Failed to start monitoring {msg.session_id}")
         return
 
-    # Send the current state immediately
-    state = await watcher.get_state(msg.session_id)
-    if state is not None:
-        await manager.broadcast_session_state(msg.session_id, state)
+    # Trigger an immediate unified broadcast so the subscriber gets current state.
+    # The watcher's start_monitoring also fires on_state_update which flows through
+    # SessionManager, but this ensures the subscriber gets state even if the watcher
+    # had already parsed this session.
+    try:
+        sm = provider.session_manager
+        sm._schedule_notify(msg.session_id)
+    except Exception:
+        logger.debug("Could not trigger immediate session update for %s", msg.session_id)
 
 
 async def _handle_unsubscribe(
@@ -587,12 +446,6 @@ async def _handle_unsubscribe(
     msg: ClientMessageUnsubscribeSession,
     provider: Any,
 ) -> None:
-    """Unsubscribe from a session.
-
-    The file watcher is **not** stopped here because other clients may still
-    be subscribed. Stopping the watcher is handled by the REST DELETE
-    endpoint or during application shutdown.
-    """
     await manager.unsubscribe(ws, msg.session_id)
 
 
@@ -600,7 +453,6 @@ async def _handle_terminal_input(
     msg: ClientMessageTerminalInput,
     provider: Any,
 ) -> None:
-    """Write data to a terminal's PTY."""
     import os
 
     try:
@@ -624,7 +476,6 @@ async def _handle_terminal_resize(
     msg: ClientMessageTerminalResize,
     provider: Any,
 ) -> None:
-    """Resize a terminal's PTY."""
     try:
         registry = provider.process_registry
     except AttributeError:
@@ -643,7 +494,6 @@ async def _handle_terminal_resize(
 
 
 async def _handle_refresh_sessions(provider: Any) -> None:
-    """Refresh all sessions and broadcast the updated list."""
     try:
         await provider.claude_monitor.refresh_sessions()
         await provider.codex_monitor.refresh_sessions()
@@ -655,3 +505,13 @@ async def _handle_refresh_sessions(provider: Any) -> None:
     repositories.extend(provider.claude_monitor.repositories)
     repositories.extend(provider.codex_monitor.repositories)
     await manager.broadcast_sessions_updated(repositories)
+
+    # Broadcast current session state for all known sessions so the frontend
+    # gets process/attention state immediately, rather than waiting for the
+    # next periodic tracker refresh (~10s).
+    try:
+        sm = provider.session_manager
+        for session in sm.get_all_sessions():
+            sm._schedule_notify(session.session_id)
+    except Exception:
+        logger.debug("Could not broadcast session states after refresh", exc_info=True)

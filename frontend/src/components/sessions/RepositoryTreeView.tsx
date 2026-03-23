@@ -19,12 +19,16 @@ function countSessions(repo: SelectedRepository): number {
 }
 
 /**
- * Count active sessions across every worktree in a repository.
+ * Count running sessions across every worktree in a repository.
+ * Uses sessionUpdates (process_pid) as the source of truth.
  */
-function countActiveSessions(repo: SelectedRepository): number {
+function countRunningSessions(
+  repo: SelectedRepository,
+  sessionUpdates: Record<string, import('@/store/sessions').SessionUpdateState>,
+): number {
   return (repo.worktrees ?? []).reduce(
     (sum, wt) =>
-      sum + (wt.sessions ?? []).filter((s) => s.is_active).length,
+      sum + (wt.sessions ?? []).filter((s) => sessionUpdates[s.id]?.process_pid != null).length,
     0,
   );
 }
@@ -41,9 +45,7 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter, 
   const repositories = useSessionsStore((s) => s.repositories);
   const selectedSessionId = useSessionsStore((s) => s.selectedSessionId);
   const selectedRepositoryPath = useSessionsStore((s) => s.selectedRepositoryPath);
-  const sessionStates = useSessionsStore((s) => s.sessionStates);
   const sessionUpdates = useSessionsStore((s) => s.sessionUpdates);
-  const monitoredSessionIds = useSessionsStore((s) => s.monitoredSessionIds);
   const selectSession = useSessionsStore((s) => s.selectSession);
   const selectRepository = useSessionsStore((s) => s.selectRepository);
   const startMonitoring = useSessionsStore((s) => s.startMonitoring);
@@ -220,7 +222,7 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter, 
         const isRepoExpanded = expandedRepos.has(repo.path);
         const isRepoSelected = selectedRepositoryPath === repo.path;
         const totalSessions = countSessions(repo);
-        const activeCount = countActiveSessions(repo);
+        const activeCount = countRunningSessions(repo, sessionUpdates);
         const worktrees = lowerFilter
           ? (repo.worktrees ?? []).filter(worktreeMatchesFilter)
           : (repo.worktrees ?? []);
@@ -289,9 +291,7 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter, 
                       isExpanded={isWtExpanded}
                       onToggle={() => toggleWorktree(wtKey)}
                       selectedSessionId={selectedSessionId}
-                      sessionStates={sessionStates}
                       sessionUpdates={sessionUpdates}
-                      monitoredSessionIds={monitoredSessionIds}
                       onSessionClick={handleSessionClick}
                       onSessionDoubleClick={handleSessionDoubleClick}
                       onDeleteWorktree={handleDeleteWorktree}
@@ -424,9 +424,7 @@ interface WorktreeNodeProps {
   isExpanded: boolean;
   onToggle: () => void;
   selectedSessionId: SessionId | null;
-  sessionStates: Record<string, import('@/types/generated').SessionMonitorState>;
   sessionUpdates: Record<string, import('@/store/sessions').SessionUpdateState>;
-  monitoredSessionIds: Set<SessionId>;
   onSessionClick: (session: TaggedSession) => void;
   onSessionDoubleClick: (session: TaggedSession) => void;
   onDeleteWorktree: (e: React.MouseEvent, worktreePath: string) => void;
@@ -440,9 +438,7 @@ const WorktreeNode: React.FC<WorktreeNodeProps> = ({
   isExpanded,
   onToggle,
   selectedSessionId,
-  sessionStates,
   sessionUpdates,
-  monitoredSessionIds,
   onSessionClick,
   onSessionDoubleClick,
   onDeleteWorktree,
@@ -522,8 +518,6 @@ const WorktreeNode: React.FC<WorktreeNodeProps> = ({
               <SessionRow
                 session={session}
                 isSelected={selectedSessionId === session.id}
-                isMonitored={monitoredSessionIds.has(session.id)}
-                monitorState={sessionStates[session.id]}
                 sessionUpdate={sessionUpdates[session.id]}
                 onClick={() => onSessionClick(session)}
                 onDoubleClick={() => onSessionDoubleClick(session)}

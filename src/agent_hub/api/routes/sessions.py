@@ -253,7 +253,6 @@ async def list_sessions(request: Request) -> SessionListResponse:
             process_states[unified.session_id] = SessionProcessState(
                 session_id=unified.session_id,
                 process=unified.process,
-                resumable=unified.is_resumable,
             )
         unmatched_processes = prov.process_tracker.get_unmatched_processes()
     except Exception:
@@ -398,7 +397,6 @@ async def get_session(session_id: str, request: Request) -> SessionDetailRespons
             process_state = SessionProcessState(
                 session_id=session_id,
                 process=unified.process,
-                resumable=unified.is_resumable,
             )
         else:
             # Fallback to direct tracker

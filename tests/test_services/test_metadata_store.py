@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
@@ -16,11 +17,12 @@ class TestMetadataStore:
     """Tests for the MetadataStore async CRUD operations."""
 
     @pytest.fixture()
-    async def store(self, tmp_path: Path) -> MetadataStore:
+    async def store(self, tmp_path: Path) -> AsyncIterator[MetadataStore]:
         db_path = tmp_path / "test.db"
         s = MetadataStore(db_path)
         await s.init_db()
-        return s
+        yield s
+        await s.close()
 
     async def test_init_db_creates_tables(self, store: MetadataStore) -> None:
         # If init_db didn't raise, tables exist

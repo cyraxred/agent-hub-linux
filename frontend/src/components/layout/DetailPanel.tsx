@@ -2,7 +2,6 @@ import React from 'react';
 import type { DetailView } from './AppLayout';
 import type { SelectedRepository, SessionMonitorState } from '@/types/generated';
 import { useSessionsStore, type TaggedSession } from '@/store/sessions';
-import { SessionId } from '@/types/session';
 import { EmbeddedTerminal } from '@/components/terminal/EmbeddedTerminal';
 import { PendingChangesView } from '@/components/diff/PendingChangesView';
 import { PlanView } from '@/components/plan/PlanView';
@@ -17,7 +16,6 @@ interface DetailPanelProps {
     selectedSession: TaggedSession | null;
     selectedRepositoryPath: string | null;
     repositories: SelectedRepository[];
-    monitoredSessionIds: Set<SessionId>;
     sessionStates: Record<string, SessionMonitorState>;
   };
   onChangeView?: (view: DetailView) => void;
@@ -30,7 +28,6 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
 }) => {
   const {
     selectedSession,
-    monitoredSessionIds,
     sessionStates,
     repositories,
   } = sessionData;
@@ -85,7 +82,6 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
     );
   }
 
-  const isMonitored = monitoredSessionIds.has(selectedSession.id);
   const sessionState = sessionStates[selectedSession.id];
   const statusKind = sessionState?.status?.kind ?? 'idle';
 
@@ -185,9 +181,6 @@ export const DetailPanel: React.FC<DetailPanelProps> = ({
             )}
             {selectedSession.is_worktree && (
               <span className="provider-badge">worktree</span>
-            )}
-            {isMonitored && (
-              <span className="provider-badge">monitored</span>
             )}
           </div>
         </div>

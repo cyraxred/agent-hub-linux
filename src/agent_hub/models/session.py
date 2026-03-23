@@ -25,14 +25,9 @@ class CLISession(BaseModel, frozen=True):
     branch_name: str | None = None
     is_worktree: bool = False
     last_activity_at: datetime
-    message_count: int = 0
-    is_active: bool = False
     first_message: str = ""
-    last_message: str = ""
     slug: str = ""
     session_file_path: str = ""
-    needs_attention: str | None = None
-    """None, 'approval' (pending tool permission), or 'question' (agent asked a question)."""
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -64,12 +59,6 @@ class WorktreeBranch(BaseModel, frozen=True):
 
     @computed_field  # type: ignore[prop-decorator]
     @property
-    def active_session_count(self) -> int:
-        """Number of active sessions in this branch."""
-        return sum(1 for s in self.sessions if s.is_active)
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
     def last_activity_at(self) -> datetime | None:
         """Most recent activity across all sessions."""
         if not self.sessions:
@@ -91,12 +80,6 @@ class SelectedRepository(BaseModel, frozen=True):
         """Total number of sessions across all worktrees."""
         return sum(len(w.sessions) for w in self.worktrees)
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def active_session_count(self) -> int:
-        """Number of active sessions across all worktrees."""
-        return sum(w.active_session_count for w in self.worktrees)
-
 
 class CLISessionGroup(BaseModel, frozen=True):
     """Group of sessions for a project."""
@@ -106,12 +89,6 @@ class CLISessionGroup(BaseModel, frozen=True):
     sessions: list[CLISession] = Field(default_factory=list)
     is_worktree: bool = False
     main_repo_path: str = ""
-
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def active_session_count(self) -> int:
-        """Number of active sessions in this group."""
-        return sum(1 for s in self.sessions if s.is_active)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

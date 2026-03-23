@@ -38,10 +38,7 @@ class TestCLISession:
             branch_name="feature/auth",
             is_worktree=False,
             last_activity_at=datetime(2025, 6, 15, 10, 30, tzinfo=timezone.utc),
-            message_count=5,
-            is_active=True,
             first_message="Help me fix a bug",
-            last_message="Done!",
             slug="fix-auth-bug",
             session_file_path="/home/user/.claude/projects/-home-user-projects-my-app/abcdef12.jsonl",
         )
@@ -50,8 +47,7 @@ class TestCLISession:
         assert session.id == "abcdef1234567890abcdef1234567890"
         assert session.project_path == "/home/user/projects/my-app"
         assert session.branch_name == "feature/auth"
-        assert session.is_active is True
-        assert session.message_count == 5
+        assert session.first_message == "Help me fix a bug"
 
     def test_short_id(self, session: CLISession) -> None:
         assert session.short_id == "abcdef12"
@@ -104,10 +100,7 @@ class TestCLISession:
         )
         assert s.branch_name is None
         assert s.is_worktree is False
-        assert s.message_count == 0
-        assert s.is_active is False
         assert s.first_message == ""
-        assert s.last_message == ""
         assert s.slug == ""
         assert s.session_file_path == ""
 
@@ -126,13 +119,11 @@ class TestWorktreeBranch:
                 id="sess_active",
                 project_path="/repo",
                 last_activity_at=now,
-                is_active=True,
             ),
             CLISession(
                 id="sess_inactive",
                 project_path="/repo",
                 last_activity_at=datetime(2025, 6, 14, 12, 0, tzinfo=timezone.utc),
-                is_active=False,
             ),
         ]
         return WorktreeBranch(
@@ -141,9 +132,6 @@ class TestWorktreeBranch:
             sessions=sessions,
             is_expanded=True,
         )
-
-    def test_active_session_count(self, branch: WorktreeBranch) -> None:
-        assert branch.active_session_count == 1
 
     def test_last_activity_at(self, branch: WorktreeBranch) -> None:
         assert branch.last_activity_at == datetime(2025, 6, 15, 12, 0, tzinfo=timezone.utc)
@@ -154,12 +142,11 @@ class TestWorktreeBranch:
 
     def test_serialization(self, branch: WorktreeBranch) -> None:
         data = branch.model_dump()
-        assert data["active_session_count"] == 1
         assert data["name"] == "main"
         assert len(data["sessions"]) == 2
 
         restored = WorktreeBranch.model_validate(data)
-        assert restored.active_session_count == 1
+        assert len(restored.sessions) == 2
 
 
 # ---------- SelectedRepository ----------
@@ -168,14 +155,14 @@ class TestWorktreeBranch:
 class TestSelectedRepository:
     """Tests for the SelectedRepository model."""
 
-    def test_total_and_active_counts(self) -> None:
+    def test_total_counts(self) -> None:
         now = datetime.now(tz=timezone.utc)
         sessions1 = [
-            CLISession(id="s1", project_path="/r", last_activity_at=now, is_active=True),
-            CLISession(id="s2", project_path="/r", last_activity_at=now, is_active=False),
+            CLISession(id="s1", project_path="/r", last_activity_at=now),
+            CLISession(id="s2", project_path="/r", last_activity_at=now),
         ]
         sessions2 = [
-            CLISession(id="s3", project_path="/r", last_activity_at=now, is_active=True),
+            CLISession(id="s3", project_path="/r", last_activity_at=now),
         ]
         repo = SelectedRepository(
             path="/repo",
@@ -186,12 +173,10 @@ class TestSelectedRepository:
             ],
         )
         assert repo.total_session_count == 3
-        assert repo.active_session_count == 2
 
     def test_empty_repo(self) -> None:
         repo = SelectedRepository(path="/empty", name="empty")
         assert repo.total_session_count == 0
-        assert repo.active_session_count == 0
 
     def test_serialization_roundtrip(self) -> None:
         now = datetime.now(tz=timezone.utc)
@@ -229,18 +214,16 @@ class TestCLISessionGroup:
             project_path="/proj",
             project_name="proj",
             sessions=[
-                CLISession(id="s1", project_path="/proj", last_activity_at=now, is_active=True),
-                CLISession(id="s2", project_path="/proj", last_activity_at=older, is_active=False),
-                CLISession(id="s3", project_path="/proj", last_activity_at=older, is_active=True),
+                CLISession(id="s1", project_path="/proj", last_activity_at=now),
+                CLISession(id="s2", project_path="/proj", last_activity_at=older),
+                CLISession(id="s3", project_path="/proj", last_activity_at=older),
             ],
         )
-        assert group.active_session_count == 2
         assert group.total_session_count == 3
         assert group.last_activity_at == now
 
     def test_empty_group(self) -> None:
         group = CLISessionGroup(project_path="/x", project_name="x")
-        assert group.active_session_count == 0
         assert group.total_session_count == 0
         assert group.last_activity_at is None
 

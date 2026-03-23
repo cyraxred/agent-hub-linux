@@ -1,5 +1,4 @@
 import React, { useState, useRef, useEffect } from 'react';
-import type { SessionMonitorState } from '@/types/generated';
 import { useSessionsStore, type TaggedSession, type SessionUpdateState } from '@/store/sessions';
 import { useHiddenSessionsStore } from '@/store/hiddenSessions';
 import { SessionId } from '@/types/session';
@@ -7,10 +6,8 @@ import { SessionId } from '@/types/session';
 interface SessionRowProps {
   session: TaggedSession;
   isSelected: boolean;
-  isMonitored: boolean;
   onClick: () => void;
   onDoubleClick: () => void;
-  monitorState?: SessionMonitorState;
   /** Unified session update state from backend. */
   sessionUpdate?: SessionUpdateState;
   /** If true, the row is in "show hidden" mode — show Unhide instead of Hide */
@@ -37,59 +34,24 @@ function truncate(text: string, maxLen: number): string {
   return text.slice(0, maxLen).trimEnd() + '\u2026';
 }
 
-/** Derive status dot color from unified effective_status, falling back to monitor state. */
+/** Derive status dot color: orange = needs attention, green = running, grey = idle. */
 function getStatusDotColor(
-  session: TaggedSession,
-  isMonitored: boolean,
-  monitorState?: SessionMonitorState,
   sessionUpdate?: SessionUpdateState,
 ): string {
-  // Prefer unified effective_status if available
-  if (sessionUpdate) {
-    switch (sessionUpdate.effective_status) {
-      case 'awaiting_approval':
-        return 'var(--accent-yellow, #d29922)';
-      case 'awaiting_question':
-        return 'var(--accent-orange, #f97316)';
-      case 'thinking':
-        return 'var(--accent-purple, #a855f7)';
-      case 'executing_tool':
-        return 'var(--accent-blue, #58a6ff)';
-      case 'waiting_for_user':
-        return 'var(--accent-orange, #f97316)';
-      case 'active':
-        return 'var(--accent-green, #3fb950)';
-      case 'idle':
-        return 'var(--text-tertiary, #6b7280)';
-    }
+  if (sessionUpdate?.needs_attention) {
+    return 'var(--accent-orange, #f97316)';
   }
-  // Fallback to monitor state
-  if (isMonitored && monitorState?.status) {
-    switch (monitorState.status.kind) {
-      case 'thinking':
-        return 'var(--accent-purple, #a855f7)';
-      case 'executing_tool':
-        return 'var(--accent-blue, #58a6ff)';
-      case 'waiting_for_user':
-        return 'var(--accent-orange, #f97316)';
-      case 'awaiting_approval':
-        return 'var(--accent-yellow, #d29922)';
-      case 'idle':
-        return 'var(--text-tertiary, #6b7280)';
-    }
+  if (sessionUpdate?.process_pid != null) {
+    return 'var(--accent-green, #3fb950)';
   }
-  return session.is_active
-    ? 'var(--accent-green, #3fb950)'
-    : 'var(--text-tertiary, #6b7280)';
+  return 'var(--text-tertiary, #6b7280)';
 }
 
 export const SessionRow: React.FC<SessionRowProps> = ({
   session,
   isSelected,
-  isMonitored,
   onClick,
   onDoubleClick,
-  monitorState,
   sessionUpdate,
   isHiddenView = false,
 }) => {
@@ -105,7 +67,7 @@ export const SessionRow: React.FC<SessionRowProps> = ({
   const [hovered, setHovered] = useState(false);
   const renameRef = useRef<HTMLInputElement>(null);
 
-  const dotColor = getStatusDotColor(session, isMonitored, monitorState, sessionUpdate);
+  const dotColor = getStatusDotColor(sessionUpdate);
   const displayName = customName || session.slug || SessionId.rawId(session.id).slice(0, 8);
   const firstMessagePreview = session.first_message
     ? truncate(session.first_message, 50)
@@ -258,20 +220,7 @@ export const SessionRow: React.FC<SessionRowProps> = ({
           </div>
         </div>
       </div>
-      <div className="session-row-right">
-        {sessionUpdate?.needs_attention && (
-          <span className="status-badge status-attention">Needs Attention</span>
-        )}
-        {sessionUpdate?.is_connectable && (
-          <span className="status-badge status-connectable">Connectable</span>
-        )}
-        {sessionUpdate && sessionUpdate.is_active && !sessionUpdate.is_connectable && (
-          <span className="status-badge status-running">Active (not connectable)</span>
-        )}
-        {!sessionUpdate && session.is_active && (
-          <span className="status-badge status-running">Active</span>
-        )}
-      </div>
+      <div className="session-row-right" />
     </div>
   );
 };

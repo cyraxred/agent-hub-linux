@@ -39,5 +39,3 @@ class SessionProcessState(BaseModel, frozen=True):
 
     session_id: str
     process: ClaudeProcessInfo | None = None
-    possibly_owned_by_unmatched: bool = False
-    resumable: bool = False

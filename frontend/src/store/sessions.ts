@@ -1,10 +1,10 @@
 import { create } from 'zustand';
 import type { CLISession, SelectedRepository, SessionMonitorState, SessionHistoryEntry, WorktreeBranch, ServerMessageSessionUpdate } from '@/types/generated';
 import { api, createApiForHost } from '@/api/client';
-import { useNotificationsStore } from '@/store/notifications';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
 import { SessionId } from '@/types/session';
 import { useHostsStore } from '@/store/hosts';
+import { showAttentionNotification, dismissAttentionNotification } from '@/lib/notifications';
 
 type Provider = string;
 
@@ -50,14 +50,11 @@ export interface HostedRepository extends Omit<SelectedRepository, 'worktrees'> 
 
 /** Unified session state from the backend's session_update WS message. */
 export interface SessionUpdateState {
-  is_active: boolean;
   is_connectable: boolean;
-  is_resumable: boolean;
   needs_attention: boolean;
   effective_status: string;
   process_category?: string | null;
   process_pid?: number | null;
-  terminal_key?: string | null;
 }
 
 interface SessionsState {
@@ -65,7 +62,7 @@ interface SessionsState {
   repositories: HostedRepository[];
   /** Per-host repository lists — merged into `repositories`. */
   _reposByHost: Record<string, HostedRepository[]>;
-  /** Session states keyed by session ID (from WS session_state_update). */
+  /** Session states keyed by session ID (from WS session_update monitor_state). */
   sessionStates: Record<string, SessionMonitorState>;
   /** Unified session update state keyed by session ID (from WS session_update). */
   sessionUpdates: Record<string, SessionUpdateState>;
@@ -109,7 +106,7 @@ interface SessionsState {
   /** Set or clear a custom name for a session (persists to backend). */
   setSessionName: (sessionId: SessionId, name: string | null) => void;
 
-  /** Called by WS hook when session_state_update arrives. */
+  /** Called by WS hook when session_update arrives with monitor_state. */
   setSessionState: (sessionId: SessionId, state: SessionMonitorState) => void;
   /** Called by WS hook when session_update arrives. */
   setSessionUpdate: (sessionId: SessionId, update: ServerMessageSessionUpdate) => void;
@@ -152,7 +149,6 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
       const reposByHost = { ...get()._reposByHost, [LOCALHOST_HOST_ID]: tagged };
       const merged = (Object.values(reposByHost) as HostedRepository[][]).flat();
       set({ repositories: merged, _reposByHost: reposByHost, loading: false });
-      useNotificationsStore.getState().syncFromRepositories(merged);
     } catch (err) {
       set({ error: (err as Error).message, loading: false });
     }
@@ -203,7 +199,6 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
 
       const merged = (Object.values(reposByHost) as HostedRepository[][]).flat();
       set({ repositories: merged, _reposByHost: reposByHost, loading: false });
-      useNotificationsStore.getState().syncFromRepositories(merged);
     } catch (err) {
       set({ error: (err as Error).message, loading: false });
     }
@@ -369,18 +364,25 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   },
 
   setSessionUpdate: (sessionId, update) => {
+    const needsAttention = update.needs_attention ?? false;
+    const prev = get().sessionUpdates[sessionId];
+    const wasAttention = prev?.needs_attention ?? false;
+
+    if (needsAttention && !wasAttention) {
+      showAttentionNotification(sessionId, update.effective_status ?? 'awaiting_approval');
+    } else if (!needsAttention && wasAttention) {
+      dismissAttentionNotification(sessionId);
+    }
+
     set((s) => ({
       sessionUpdates: {
         ...s.sessionUpdates,
         [sessionId]: {
-          is_active: update.is_active ?? false,
-          is_connectable: update.is_connectable ?? false,
-          is_resumable: update.is_resumable ?? true,
-          needs_attention: update.needs_attention ?? false,
+          is_connectable: update.is_connectable ?? true,
+          needs_attention: needsAttention,
           effective_status: update.effective_status ?? 'idle',
           process_category: update.process_category,
           process_pid: update.process_pid,
-          terminal_key: update.terminal_key,
         },
       },
     }));
@@ -409,7 +411,6 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
     set((s) => {
       const reposByHost = { ...s._reposByHost, [hostId]: tagged };
       const merged = (Object.values(reposByHost) as HostedRepository[][]).flat();
-      useNotificationsStore.getState().syncFromRepositories(merged);
       return { repositories: merged, _reposByHost: reposByHost };
     });
   },

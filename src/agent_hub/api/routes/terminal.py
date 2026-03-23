@@ -112,13 +112,6 @@ def _get_registry(request: Request) -> ProcessRegistry:
     return registry
 
 
-def _make_key(session_id: str | None, project_path: str) -> str:
-    """Generate a stable key for a terminal process."""
-    if session_id:
-        return f"term-{session_id}"
-    return f"term-{abs(hash(project_path))}"
-
-
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -146,32 +139,39 @@ async def launch_terminal(
     rather than passed as a CLI argument, so Claude receives it as user input.
     """
     registry = _get_registry(request)
-    key = _make_key(body.session_id, body.project_path)
+    session_id = body.session_id
 
-    # Check for an existing terminal
-    existing = registry.get(key)
+    # Check for an existing terminal (only when a session_id is provided)
+    existing = registry.get(session_id) if session_id else None
     if existing is not None:
         # Terminal already running — send prompt as stdin if provided
         if body.prompt:
             try:
                 os.write(existing.fd, (body.prompt + "\n").encode("utf-8"))
             except OSError:
-                logger.debug("Failed to write prompt to existing terminal %s", key)
+                logger.debug("Failed to write prompt to existing terminal %s", session_id)
         return TerminalLaunchResponse(
-            key=key,
+            key=session_id,
             pid=existing.pid,
             fd=existing.fd,
             session_id=existing.session_id,
             project_path=existing.project_path,
         )
 
+    # Resume requires a session_id.
+    if body.resume and not session_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot resume without a session_id.",
+        )
+
     # Guard: reject if the session has a running process that isn't connectable.
     # Resuming such a session would fork the JSONL transcript.
-    if body.session_id and body.resume:
+    if body.resume:
         try:
             sm = request.app.state.provider.session_manager
             session = sm.get_session(body.session_id)
-            if session and session.is_active and not session.is_connectable:
+            if session and session.is_running and not session.is_connectable:
                 cat = session.process.category if session.process else "unknown"
                 pid = session.process.pid if session.process else 0
                 raise HTTPException(
@@ -235,25 +235,23 @@ async def launch_terminal(
             detail=f"Failed to spawn terminal: {exc}",
         ) from exc
 
-    proc.session_id = body.session_id
+    proc.session_id = session_id
     proc.project_path = body.project_path
 
-    registry.register(key, proc)
+    if session_id:
+        registry.register(session_id, proc)
 
-    # Notify process tracker of hub-launched process
-    try:
-        tracker = request.app.state.provider.process_tracker
-        if body.session_id:
-            tracker.notify_hub_launch(proc.pid, body.session_id)
-    except AttributeError:
-        pass
-
-    # Notify session manager
-    if body.session_id:
+        # Notify process tracker of hub-launched process
         try:
-            import asyncio
+            tracker = request.app.state.provider.process_tracker
+            tracker.notify_hub_launch(proc.pid, session_id)
+        except AttributeError:
+            pass
+
+        # Notify session manager
+        try:
             sm = request.app.state.provider.session_manager
-            asyncio.ensure_future(sm.handle_terminal_registered(body.session_id, key))
+            asyncio.ensure_future(sm.handle_terminal_registered(session_id))
         except (AttributeError, Exception):
             pass
 
@@ -262,10 +260,10 @@ async def launch_terminal(
         asyncio.create_task(_write_prompt_deferred(proc.fd, body.prompt))
 
     return TerminalLaunchResponse(
-        key=key,
+        key=session_id,
         pid=proc.pid,
         fd=proc.fd,
-        session_id=body.session_id,
+        session_id=session_id,
         project_path=body.project_path,
     )
 
@@ -315,7 +313,6 @@ async def terminate_terminal(
     # Notify session manager
     if proc.session_id:
         try:
-            import asyncio
             sm = request.app.state.provider.session_manager
             asyncio.ensure_future(sm.handle_terminal_unregistered(proc.session_id))
         except (AttributeError, Exception):

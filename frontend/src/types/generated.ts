@@ -106,13 +106,9 @@ export interface CLISession {
   branch_name?: string | null;
   is_worktree?: boolean;
   last_activity_at: string;
-  message_count?: number;
-  is_active?: boolean;
   first_message?: string;
-  last_message?: string;
   slug?: string;
   session_file_path?: string;
-  needs_attention?: string | null;
 }
 
 export interface CLISessionGroup {
@@ -372,40 +368,6 @@ export interface ServerMessageError {
   message: string;
 }
 
-export interface ServerMessageNotification {
-  kind: "notification";
-  notification: AttentionNotification;
-}
-
-export interface ServerMessageNotificationList {
-  kind: "notification_list";
-  notifications?: AttentionNotification[];
-}
-
-export interface ServerMessageNotificationResolved {
-  kind: "notification_resolved";
-  notification_id: string;
-  session_id: string;
-}
-
-export interface SessionProcessState {
-  session_id: string;
-  process?: ClaudeProcessInfo | null;
-  possibly_owned_by_unmatched?: boolean;
-  resumable?: boolean;
-}
-
-export interface UnmatchedClaudeProcess {
-  pid: number;
-  cwd?: string;
-}
-
-export interface ServerMessageProcessStateUpdate {
-  kind: "process_state_update";
-  process_states?: Record<string, SessionProcessState>;
-  unmatched_processes?: UnmatchedClaudeProcess[];
-}
-
 export interface SessionSearchResult {
   id: string;
   slug?: string;
@@ -486,23 +448,15 @@ export interface SessionStatusWaitingForUser {
   kind: "waiting_for_user";
 }
 
-export interface ServerMessageSessionStateUpdate {
-  kind: "session_state_update";
-  session_id: string;
-  state: SessionMonitorState;
-}
-
 export interface ServerMessageSessionUpdate {
   kind: "session_update";
   session_id: string;
-  is_active?: boolean;
   is_connectable?: boolean;
-  is_resumable?: boolean;
   needs_attention?: boolean;
   effective_status?: string;
+  last_activity_at?: string | null;
   process_category?: string | null;
   process_pid?: number | null;
-  terminal_key?: string | null;
   monitor_state?: SessionMonitorState | null;
   notifications?: AttentionNotification[];
 }
@@ -532,6 +486,16 @@ export interface SessionIndexEntry {
   first_message?: string;
   summaries?: string[];
   last_activity_at: string;
+}
+
+export interface SessionProcessState {
+  session_id: string;
+  process?: ClaudeProcessInfo | null;
+}
+
+export interface UnmatchedClaudeProcess {
+  pid: number;
+  cwd?: string;
 }
 
 export interface WorktreeCreationProgressCompleted {
@@ -592,17 +556,12 @@ export type DevServerState =
   | DevServerStateStopping;
 
 export type ServerMessage =
-  | ServerMessageSessionStateUpdate
   | ServerMessageSessionsUpdated
   | ServerMessageStatsUpdated
   | ServerMessageSearchResults
   | ServerMessageTerminalOutput
   | ServerMessageSessionHistoryAppend
   | ServerMessageSessionUpdate
-  | ServerMessageProcessStateUpdate
-  | ServerMessageNotification
-  | ServerMessageNotificationResolved
-  | ServerMessageNotificationList
   | ServerMessageError;
 
 export type SessionStatus =
