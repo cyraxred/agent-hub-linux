@@ -33,16 +33,27 @@ export const SessionView: React.FC<SessionViewProps> = ({
   const refreshSessionState = useSessionsStore((s) => s.refreshSessionState);
 
   const isMonitored = monitoredSessionIds.has(sessionId);
-  const [expanded, setExpanded] = useState(isMonitored);
+  const [expanded, setExpanded] = useState(true);
 
-  // Auto-expand when monitoring starts, collapse when it stops
+  // Auto-monitor: start when this view mounts, stop when it unmounts
   useEffect(() => {
-    setExpanded(isMonitored);
-  }, [isMonitored]);
+    if (!isMonitored) {
+      startMonitoring(sessionId, session.project_path, session.session_file_path);
+    }
+    return () => {
+      // Stop monitoring when the session view unmounts (deselected)
+      if (monitoredSessionIds.has(sessionId)) {
+        stopMonitoring(sessionId);
+      }
+    };
+    // Only trigger on sessionId change, not on isMonitored
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
-  const handleStartMonitoring = () => {
-    startMonitoring(sessionId, session.project_path, session.session_file_path);
-  };
+  // Auto-expand when monitoring starts
+  useEffect(() => {
+    if (isMonitored) setExpanded(true);
+  }, [isMonitored]);
 
   const handleCardAction = useCallback(
     (action: string, _sessionId: SessionId) => {
@@ -141,29 +152,13 @@ export const SessionView: React.FC<SessionViewProps> = ({
             )}
           </>
         ) : (
-          <div
-            className="session-monitor-collapsed-bar"
-            onClick={() => setExpanded(!expanded)}
-          >
-            <span className="session-expand-icon">
-              {expanded ? '\u25BC' : '\u25B6'}
-            </span>
+          <div className="session-monitor-collapsed-bar">
             <span
               className="status-dot"
               style={{ backgroundColor: 'var(--text-tertiary)' }}
             />
-            <button
-              className="btn btn-primary"
-              style={{ padding: '2px 10px', fontSize: 'var(--font-size-xs)' }}
-              onClick={(e) => {
-                e.stopPropagation();
-                handleStartMonitoring();
-              }}
-            >
-              Start Monitoring
-            </button>
             <span className="session-monitor-status-label" style={{ color: 'var(--text-tertiary)' }}>
-              Not monitored
+              Loading...
             </span>
           </div>
         )}

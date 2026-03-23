@@ -80,7 +80,12 @@ class SessionFileWatcher:
         self._history_callbacks: list[
             asyncio.coroutines  # type: ignore[type-arg]
         ] = []
+        self._tool_result_callbacks: list[
+            asyncio.coroutines  # type: ignore[type-arg]
+        ] = []
         self._lock = asyncio.Lock()
+        # Track tool_use_ids seen before each parse so we can detect resolved ones.
+        self._prev_pending: dict[str, set[str]] = {}  # session_id -> set of tool_use_ids
 
     def on_state_update(self, callback: object) -> None:
         """Register a callback for state updates."""
@@ -89,6 +94,22 @@ class SessionFileWatcher:
     def on_history_append(self, callback: object) -> None:
         """Register a callback for new raw JSONL entries."""
         self._history_callbacks.append(callback)  # type: ignore[arg-type]
+
+    def on_tool_result(self, callback: object) -> None:
+        """Register a callback for tool_use_id resolution (tool_result arrived).
+
+        Callback signature: ``async def cb(session_id: str, tool_use_id: str) -> None``
+        """
+        self._tool_result_callbacks.append(callback)  # type: ignore[arg-type]
+
+    async def _notify_tool_results(self, session_id: str, resolved_ids: set[str]) -> None:
+        """Notify callbacks that tool results arrived for given tool_use_ids."""
+        for tool_use_id in resolved_ids:
+            for cb in self._tool_result_callbacks:
+                try:
+                    await cb(session_id, tool_use_id)  # type: ignore[misc]
+                except Exception:
+                    logger.exception("Error in tool_result callback")
 
     async def _notify_state_update(self, session_id: str, state: SessionMonitorState) -> None:
         """Notify all registered callbacks of a state update."""
@@ -219,9 +240,16 @@ class SessionFileWatcher:
             watched.byte_offset += len(new_data)
             lines = new_data.decode("utf-8", errors="replace").splitlines()
 
+            # Snapshot pending tool_use_ids before parsing
+            pending_before = set(watched.parse_result.pending_tool_uses.keys())
+
             parse_new_lines(
                 lines, watched.parse_result, self._approval_timeout_seconds
             )
+
+            # Detect tool_use_ids that got resolved (tool_result arrived)
+            pending_after = set(watched.parse_result.pending_tool_uses.keys())
+            resolved_ids = pending_before - pending_after
 
             # Build raw history entries from the new lines
             new_entries: list[dict[str, object]] = []
@@ -250,6 +278,10 @@ class SessionFileWatcher:
                 await self._notify_history_append(
                     watched.session_id, new_entries, watched.line_count
                 )
+
+            # Notify about resolved tool_use_ids (for attention resolution)
+            if resolved_ids and self._tool_result_callbacks:
+                await self._notify_tool_results(watched.session_id, resolved_ids)
 
             # Write-through to parse cache
             if self._parse_cache is not None:

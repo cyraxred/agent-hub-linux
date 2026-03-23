@@ -165,6 +165,44 @@ async def launch_terminal(
             project_path=existing.project_path,
         )
 
+    # Guard: reject if the session has a running process that isn't connectable.
+    # Resuming such a session would fork the JSONL transcript.
+    if body.session_id and body.resume:
+        try:
+            sm = request.app.state.provider.session_manager
+            session = sm.get_session(body.session_id)
+            if session and session.is_active and not session.is_connectable:
+                cat = session.process.category if session.process else "unknown"
+                pid = session.process.pid if session.process else 0
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Session {body.session_id} has a running {cat} process "
+                        f"(pid {pid}) that cannot be connected to. "
+                        "Resuming would fork the session transcript."
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            # Fallback to direct tracker check
+            try:
+                tracker = request.app.state.provider.process_tracker
+                proc_info = tracker.get_process_for_session(body.session_id)
+                if proc_info is not None and proc_info.category in ("user", "third_party"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Session {body.session_id} has a running {proc_info.category} process "
+                            f"(pid {proc_info.pid}) that cannot be connected to. "
+                            "Resuming would fork the session transcript."
+                        ),
+                    )
+            except HTTPException:
+                raise
+            except AttributeError:
+                pass
+
     # Resolve the CLI command
     try:
         settings = request.app.state.provider.settings
@@ -201,6 +239,23 @@ async def launch_terminal(
     proc.project_path = body.project_path
 
     registry.register(key, proc)
+
+    # Notify process tracker of hub-launched process
+    try:
+        tracker = request.app.state.provider.process_tracker
+        if body.session_id:
+            tracker.notify_hub_launch(proc.pid, body.session_id)
+    except AttributeError:
+        pass
+
+    # Notify session manager
+    if body.session_id:
+        try:
+            import asyncio
+            sm = request.app.state.provider.session_manager
+            asyncio.ensure_future(sm.handle_terminal_registered(body.session_id, key))
+        except (AttributeError, Exception):
+            pass
 
     # Write prompt to stdin after delay so Claude has time to start
     if body.prompt:
@@ -249,6 +304,22 @@ async def terminate_terminal(
     proc = registry.get(key)
     if proc is None:
         raise HTTPException(status_code=404, detail=f"Terminal not found: {key}")
+
+    # Notify process tracker before terminating
+    try:
+        tracker = request.app.state.provider.process_tracker
+        tracker.notify_hub_terminate(proc.pid)
+    except AttributeError:
+        pass
+
+    # Notify session manager
+    if proc.session_id:
+        try:
+            import asyncio
+            sm = request.app.state.provider.session_manager
+            asyncio.ensure_future(sm.handle_terminal_unregistered(proc.session_id))
+        except (AttributeError, Exception):
+            pass
 
     try:
         registry.terminate(key)

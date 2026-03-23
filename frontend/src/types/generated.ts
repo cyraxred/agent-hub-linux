@@ -5,6 +5,8 @@
 
 export type CLISessionSourceType = "Claw" | "CLI";
 
+export type ClaudeProcessCategory = "hub" | "tmux" | "user" | "third_party";
+
 export type CodeChangeToolType = "edit" | "write" | "multi_edit";
 
 export type DiffMode = "unstaged" | "staged" | "branch";
@@ -119,6 +121,17 @@ export interface CLISessionGroup {
   sessions?: CLISession[];
   is_worktree?: boolean;
   main_repo_path?: string;
+}
+
+export interface ClaudeProcessInfo {
+  pid: number;
+  session_id: string;
+  category: ClaudeProcessCategory;
+  monitored?: boolean;
+  terminal_connected?: boolean;
+  cwd?: string;
+  model?: string;
+  started_at?: number;
 }
 
 export interface ClientMessageRefreshSessions {
@@ -375,6 +388,24 @@ export interface ServerMessageNotificationResolved {
   session_id: string;
 }
 
+export interface SessionProcessState {
+  session_id: string;
+  process?: ClaudeProcessInfo | null;
+  possibly_owned_by_unmatched?: boolean;
+  resumable?: boolean;
+}
+
+export interface UnmatchedClaudeProcess {
+  pid: number;
+  cwd?: string;
+}
+
+export interface ServerMessageProcessStateUpdate {
+  kind: "process_state_update";
+  process_states?: Record<string, SessionProcessState>;
+  unmatched_processes?: UnmatchedClaudeProcess[];
+}
+
 export interface SessionSearchResult {
   id: string;
   slug?: string;
@@ -459,6 +490,21 @@ export interface ServerMessageSessionStateUpdate {
   kind: "session_state_update";
   session_id: string;
   state: SessionMonitorState;
+}
+
+export interface ServerMessageSessionUpdate {
+  kind: "session_update";
+  session_id: string;
+  is_active?: boolean;
+  is_connectable?: boolean;
+  is_resumable?: boolean;
+  needs_attention?: boolean;
+  effective_status?: string;
+  process_category?: string | null;
+  process_pid?: number | null;
+  terminal_key?: string | null;
+  monitor_state?: SessionMonitorState | null;
+  notifications?: AttentionNotification[];
 }
 
 export interface ServerMessageSessionsUpdated {
@@ -552,6 +598,8 @@ export type ServerMessage =
   | ServerMessageSearchResults
   | ServerMessageTerminalOutput
   | ServerMessageSessionHistoryAppend
+  | ServerMessageSessionUpdate
+  | ServerMessageProcessStateUpdate
   | ServerMessageNotification
   | ServerMessageNotificationResolved
   | ServerMessageNotificationList

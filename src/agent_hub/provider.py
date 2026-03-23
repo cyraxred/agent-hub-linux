@@ -15,8 +15,10 @@ from agent_hub.services.dev_server_manager import DevServerManager
 from agent_hub.services.global_search_service import GlobalSearchService
 from agent_hub.services.global_stats_service import GlobalStatsService
 from agent_hub.services.metadata_store import MetadataStore
+from agent_hub.services.claude_process_tracker import ClaudeProcessTracker
 from agent_hub.services.process_registry import ProcessRegistry
 from agent_hub.services.session_file_watcher import SessionFileWatcher
+from agent_hub.services.session_manager import SessionManager
 from agent_hub.services.session_parse_cache import SessionParseCache
 
 if TYPE_CHECKING:
@@ -91,6 +93,8 @@ class AgentHubProvider:
         self._codex_search: CodexSearchService | None = None
         self._metadata_store: MetadataStore | None = None
         self._process_registry: ProcessRegistry | None = None
+        self._process_tracker: ClaudeProcessTracker | None = None
+        self._session_manager: SessionManager | None = None
         self._dev_server_manager: DevServerManager | None = None
         self._proxy_service: object | None = None  # ProxyService — imported lazily
 
@@ -208,6 +212,21 @@ class AgentHubProvider:
         return self._process_registry
 
     @property
+    def process_tracker(self) -> ClaudeProcessTracker:
+        if self._process_tracker is None:
+            self._process_tracker = ClaudeProcessTracker(
+                claude_data_path=self._settings.claude_data_path,
+                process_registry=self.process_registry,
+            )
+        return self._process_tracker
+
+    @property
+    def session_manager(self) -> SessionManager:
+        if self._session_manager is None:
+            self._session_manager = SessionManager()
+        return self._session_manager
+
+    @property
     def proxy_service(self) -> object:
         """Return the :class:`~agent_hub.services.proxy_service.ProxyService` singleton."""
         if self._proxy_service is None:
@@ -253,6 +272,22 @@ class AgentHubProvider:
 
         # 5. Auto-discover repositories from session files
         await self._auto_discover_repositories()
+
+        # 6. Install session hooks and start process tracker
+        try:
+            from agent_hub.services.hook_installer import ensure_hooks_installed
+
+            ensure_hooks_installed(self._settings.claude_data_path)
+            logger.info("Session hooks installed")
+        except Exception:
+            logger.exception("Failed to install session hooks")
+
+        await self.process_tracker.start()
+        logger.info("ClaudeProcessTracker started")
+
+        await self.session_manager.start()
+        self.session_manager.set_tracker(self.process_tracker)
+        logger.info("SessionManager started")
 
         logger.info("AgentHubProvider initialised successfully.")
 
@@ -320,6 +355,16 @@ class AgentHubProvider:
         if self._dev_server_manager is not None:
             await self._dev_server_manager.stop_all()
             logger.debug("Dev servers stopped")
+
+        # Session manager (before process tracker)
+        if self._session_manager is not None:
+            await self._session_manager.stop()
+            logger.debug("Session manager stopped")
+
+        # Process tracker (before process registry cleanup)
+        if self._process_tracker is not None:
+            await self._process_tracker.stop()
+            logger.debug("Process tracker stopped")
 
         # Process registry
         if self._process_registry is not None:

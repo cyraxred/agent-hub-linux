@@ -25,8 +25,6 @@ from agent_hub.models.monitor_state import (
     EditEntry,
     PendingToolUse,
     SessionMonitorState,
-    SessionStatusAwaitingApproval,
-    SessionStatusAwaitingQuestion,
     SessionStatusExecutingTool,
     SessionStatusIdle,
     SessionStatusThinking,
@@ -395,36 +393,15 @@ def parse_new_lines(
 def update_current_status(
     result: ParseResult, approval_timeout_seconds: int = 0
 ) -> None:
-    """Update the current session status based on recent activities."""
+    """Update the current session status based on recent activities.
+
+    Note: ``approval_timeout_seconds`` is accepted for backward compatibility
+    but no longer used.  Attention detection (awaiting_approval /
+    awaiting_question) is now driven by hooks writing to
+    ``~/.claude/agent-hub/sessions.jsonl``, not by timeout heuristics.
+    """
     if not result.recent_activities:
         return
-
-    # Check for pending tool uses that may be awaiting approval
-    if result.pending_tool_uses and approval_timeout_seconds > 0:
-        now = datetime.now(tz=timezone.utc)
-        for pending in result.pending_tool_uses.values():
-            elapsed = (now - pending.timestamp).total_seconds()
-            if elapsed >= approval_timeout_seconds:
-                is_question = pending.tool_name.lower() in (
-                    "askuserquestion",
-                    "ask_user_question",
-                )
-                status = (
-                    SessionStatusAwaitingQuestion()
-                    if is_question
-                    else SessionStatusAwaitingApproval(tool=pending.tool_name)
-                )
-                result.current_status = SessionMonitorState(
-                    status=status,
-                    pending_tool_use=PendingToolUse(
-                        tool_name=pending.tool_name,
-                        tool_use_id=pending.tool_use_id,
-                        timestamp=pending.timestamp,
-                        input_str=pending.input_str,
-                        code_change_input=pending.code_change_input,
-                    ),
-                )
-                return
 
     # Determine status from last activity
     last = result.recent_activities[-1]

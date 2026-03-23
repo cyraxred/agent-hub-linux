@@ -17,6 +17,7 @@ from agent_hub.models.monitor_state import (
     PlanInfo,
     SessionMonitorState,
 )
+from agent_hub.models.process_info import SessionProcessState, UnmatchedClaudeProcess
 from agent_hub.models.session import CLISession, SelectedRepository
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ class SessionListResponse(BaseModel):
 
     sessions: list[CLISession]
     total: int
+    process_states: dict[str, SessionProcessState] = {}
+    unmatched_processes: list[UnmatchedClaudeProcess] = []
 
 
 class SessionDetailResponse(BaseModel):
@@ -42,6 +45,7 @@ class SessionDetailResponse(BaseModel):
     session: CLISession
     repository_path: str
     provider: str
+    process_state: SessionProcessState | None = None
 
 
 class MonitorStartRequest(BaseModel):
@@ -239,7 +243,38 @@ async def list_sessions(request: Request) -> SessionListResponse:
     sessions = _collect_all_sessions(prov)
     # Sort by most recent activity first
     sessions.sort(key=lambda s: s.last_activity_at, reverse=True)
-    return SessionListResponse(sessions=sessions, total=len(sessions))
+
+    # Process tracking data — prefer SessionManager, fall back to tracker
+    process_states: dict[str, SessionProcessState] = {}
+    unmatched_processes: list[UnmatchedClaudeProcess] = []
+    try:
+        sm = prov.session_manager
+        for unified in sm.get_all_sessions():
+            process_states[unified.session_id] = SessionProcessState(
+                session_id=unified.session_id,
+                process=unified.process,
+                resumable=unified.is_resumable,
+            )
+        unmatched_processes = prov.process_tracker.get_unmatched_processes()
+    except Exception:
+        # Fallback to direct tracker
+        try:
+            tracker = prov.process_tracker
+            ps = tracker.get_all_process_states()
+            up = tracker.get_unmatched_processes()
+            if isinstance(ps, dict):
+                process_states = ps
+            if isinstance(up, list):
+                unmatched_processes = up
+        except Exception:
+            logger.debug("Process tracker not available", exc_info=True)
+
+    return SessionListResponse(
+        sessions=sessions,
+        total=len(sessions),
+        process_states=process_states,
+        unmatched_processes=unmatched_processes,
+    )
 
 
 @router.get("/names/all", response_model=AllSessionNamesResponse)
@@ -355,10 +390,33 @@ async def get_session(session_id: str, request: Request) -> SessionDetailRespons
     session, repo_path, provider_name = _find_session_across_providers(prov, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    process_state: SessionProcessState | None = None
+    try:
+        unified = prov.session_manager.get_session(session_id)
+        if unified is not None:
+            process_state = SessionProcessState(
+                session_id=session_id,
+                process=unified.process,
+                resumable=unified.is_resumable,
+            )
+        else:
+            # Fallback to direct tracker
+            tracker = prov.process_tracker
+            proc_info = tracker.get_process_for_session(session_id)
+            process_state = SessionProcessState(
+                session_id=session_id,
+                process=proc_info,
+                resumable=tracker.is_session_resumable(session_id),
+            )
+    except Exception:
+        logger.debug("Process tracker not available", exc_info=True)
+
     return SessionDetailResponse(
         session=session,
         repository_path=repo_path,
         provider=provider_name,
+        process_state=process_state,
     )
 
 
@@ -504,6 +562,39 @@ async def refresh_session_state(
         state=state,
         monitoring=state is not None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Process state
+# ---------------------------------------------------------------------------
+
+
+class SessionProcessResponse(BaseModel):
+    """Response for the per-session process endpoint."""
+
+    session_id: str
+    process_state: SessionProcessState | None = None
+
+
+@router.get("/{session_id}/process", response_model=SessionProcessResponse)
+async def get_session_process(
+    session_id: str,
+    request: Request,
+) -> SessionProcessResponse:
+    """Get the process state for a specific session."""
+    prov = _get_provider(request)
+    try:
+        tracker = prov.process_tracker
+        proc_info = tracker.get_process_for_session(session_id)
+        state = SessionProcessState(
+            session_id=session_id,
+            process=proc_info,
+            resumable=tracker.is_session_resumable(session_id),
+        )
+        return SessionProcessResponse(session_id=session_id, process_state=state)
+    except Exception:
+        logger.debug("Process tracker not available", exc_info=True)
+        return SessionProcessResponse(session_id=session_id)
 
 
 # ---------------------------------------------------------------------------

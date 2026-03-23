@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 _ACTIVE_THRESHOLD_SECONDS = 60.0
 
+from typing import Callable
+
 
 class CodexSessionMonitorService:
     """Discovers and manages Codex CLI sessions."""
@@ -23,6 +25,11 @@ class CodexSessionMonitorService:
         self._repositories: list[SelectedRepository] = []
         self._history_offset: int = 0
         self._history_entries: list[HistoryEntry] = []
+        self._refresh_callbacks: list[Callable] = []
+
+    def on_refresh(self, callback: Callable) -> None:
+        """Register a callback fired after refresh_sessions with the discovered sessions list."""
+        self._refresh_callbacks.append(callback)
 
     @property
     def repositories(self) -> list[SelectedRepository]:
@@ -57,6 +64,18 @@ class CodexSessionMonitorService:
             refreshed = await self._scan_repository(repo.path)
             new_repos.append(refreshed if refreshed else repo)
         self._repositories = new_repos
+
+        # Fire refresh callbacks with all discovered sessions
+        if self._refresh_callbacks:
+            all_sessions = []
+            for repo in self._repositories:
+                for wt in repo.worktrees:
+                    all_sessions.extend(wt.sessions)
+            for cb in self._refresh_callbacks:
+                try:
+                    cb(all_sessions)
+                except Exception:
+                    logger.exception("Error in refresh callback")
 
     async def _load_history(self) -> None:
         history_file = get_history_file(self._codex_path)

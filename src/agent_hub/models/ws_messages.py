@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from agent_hub.models.monitor_state import SessionMonitorState
+from agent_hub.models.process_info import SessionProcessState, UnmatchedClaudeProcess
 from agent_hub.models.search import SessionSearchResult
 from agent_hub.models.session import SelectedRepository
 from agent_hub.models.stats import GlobalStatsCache
@@ -68,15 +69,18 @@ class ServerMessageTerminalOutput(BaseModel, frozen=True):
     data: str
 
 
+    # --- Legacy message types (kept for backward compat, will be removed) ---
+
+
 class ServerMessageNotification(BaseModel, frozen=True):
-    """Server sends a new attention notification."""
+    """Server sends a new attention notification. (Legacy — use session_update)"""
 
     kind: Literal["notification"] = "notification"
     notification: AttentionNotification
 
 
 class ServerMessageNotificationResolved(BaseModel, frozen=True):
-    """Server notifies that a notification has been resolved."""
+    """Server notifies that a notification has been resolved. (Legacy — use session_update)"""
 
     kind: Literal["notification_resolved"] = "notification_resolved"
     notification_id: str
@@ -84,9 +88,34 @@ class ServerMessageNotificationResolved(BaseModel, frozen=True):
 
 
 class ServerMessageNotificationList(BaseModel, frozen=True):
-    """Server sends the full list of active notifications (on connect)."""
+    """Server sends the full list of active notifications (on connect). (Legacy — use session_update)"""
 
     kind: Literal["notification_list"] = "notification_list"
+    notifications: list[AttentionNotification] = Field(default_factory=list)
+
+
+class ServerMessageProcessStateUpdate(BaseModel, frozen=True):
+    """Server notifies client of process state changes. (Legacy — use session_update)"""
+
+    kind: Literal["process_state_update"] = "process_state_update"
+    process_states: dict[str, SessionProcessState] = Field(default_factory=dict)
+    unmatched_processes: list[UnmatchedClaudeProcess] = Field(default_factory=list)
+
+
+class ServerMessageSessionUpdate(BaseModel, frozen=True):
+    """Unified session state update — replaces process_state_update + notification messages."""
+
+    kind: Literal["session_update"] = "session_update"
+    session_id: str
+    is_active: bool = False
+    is_connectable: bool = False
+    is_resumable: bool = True
+    needs_attention: bool = False
+    effective_status: str = "idle"
+    process_category: str | None = None
+    process_pid: int | None = None
+    terminal_key: str | None = None
+    monitor_state: SessionMonitorState | None = None
     notifications: list[AttentionNotification] = Field(default_factory=list)
 
 
@@ -121,6 +150,8 @@ ServerMessage = Annotated[
     | ServerMessageSearchResults
     | ServerMessageTerminalOutput
     | ServerMessageSessionHistoryAppend
+    | ServerMessageSessionUpdate
+    | ServerMessageProcessStateUpdate
     | ServerMessageNotification
     | ServerMessageNotificationResolved
     | ServerMessageNotificationList

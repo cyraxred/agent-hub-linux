@@ -73,6 +73,10 @@ class CodexSessionFileWatcher:
     def on_history_append(self, callback: object) -> None:
         self._history_callbacks.append(callback)
 
+    def on_tool_result(self, callback: object) -> None:
+        """No-op for codex — attention tracking is Claude-only."""
+        pass
+
     async def _notify_state_update(self, session_id: str, state: SessionMonitorState) -> None:
         for cb in self._state_callbacks:
             try:

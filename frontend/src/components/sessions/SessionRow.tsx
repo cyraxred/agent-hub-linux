@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import type { SessionMonitorState } from '@/types/generated';
-import { useSessionsStore, type TaggedSession } from '@/store/sessions';
+import { useSessionsStore, type TaggedSession, type SessionUpdateState } from '@/store/sessions';
 import { useHiddenSessionsStore } from '@/store/hiddenSessions';
 import { SessionId } from '@/types/session';
 
@@ -11,6 +11,8 @@ interface SessionRowProps {
   onClick: () => void;
   onDoubleClick: () => void;
   monitorState?: SessionMonitorState;
+  /** Unified session update state from backend. */
+  sessionUpdate?: SessionUpdateState;
   /** If true, the row is in "show hidden" mode — show Unhide instead of Hide */
   isHiddenView?: boolean;
 }
@@ -35,11 +37,33 @@ function truncate(text: string, maxLen: number): string {
   return text.slice(0, maxLen).trimEnd() + '\u2026';
 }
 
+/** Derive status dot color from unified effective_status, falling back to monitor state. */
 function getStatusDotColor(
   session: TaggedSession,
   isMonitored: boolean,
   monitorState?: SessionMonitorState,
+  sessionUpdate?: SessionUpdateState,
 ): string {
+  // Prefer unified effective_status if available
+  if (sessionUpdate) {
+    switch (sessionUpdate.effective_status) {
+      case 'awaiting_approval':
+        return 'var(--accent-yellow, #d29922)';
+      case 'awaiting_question':
+        return 'var(--accent-orange, #f97316)';
+      case 'thinking':
+        return 'var(--accent-purple, #a855f7)';
+      case 'executing_tool':
+        return 'var(--accent-blue, #58a6ff)';
+      case 'waiting_for_user':
+        return 'var(--accent-orange, #f97316)';
+      case 'active':
+        return 'var(--accent-green, #3fb950)';
+      case 'idle':
+        return 'var(--text-tertiary, #6b7280)';
+    }
+  }
+  // Fallback to monitor state
   if (isMonitored && monitorState?.status) {
     switch (monitorState.status.kind) {
       case 'thinking':
@@ -66,6 +90,7 @@ export const SessionRow: React.FC<SessionRowProps> = ({
   onClick,
   onDoubleClick,
   monitorState,
+  sessionUpdate,
   isHiddenView = false,
 }) => {
   const customName = useSessionsStore((s) => s.customSessionNames[session.id]);
@@ -80,7 +105,7 @@ export const SessionRow: React.FC<SessionRowProps> = ({
   const [hovered, setHovered] = useState(false);
   const renameRef = useRef<HTMLInputElement>(null);
 
-  const dotColor = getStatusDotColor(session, isMonitored, monitorState);
+  const dotColor = getStatusDotColor(session, isMonitored, monitorState, sessionUpdate);
   const displayName = customName || session.slug || SessionId.rawId(session.id).slice(0, 8);
   const firstMessagePreview = session.first_message
     ? truncate(session.first_message, 50)
@@ -234,11 +259,17 @@ export const SessionRow: React.FC<SessionRowProps> = ({
         </div>
       </div>
       <div className="session-row-right">
-        {session.is_active && (
-          <span className="status-badge status-running">Active</span>
+        {sessionUpdate?.needs_attention && (
+          <span className="status-badge status-attention">Needs Attention</span>
         )}
-        {isMonitored && (
-          <span className="status-badge status-completed">Monitored</span>
+        {sessionUpdate?.is_connectable && (
+          <span className="status-badge status-connectable">Connectable</span>
+        )}
+        {sessionUpdate && sessionUpdate.is_active && !sessionUpdate.is_connectable && (
+          <span className="status-badge status-running">Active (not connectable)</span>
+        )}
+        {!sessionUpdate && session.is_active && (
+          <span className="status-badge status-running">Active</span>
         )}
       </div>
     </div>

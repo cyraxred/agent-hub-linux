@@ -1,4 +1,5 @@
 import { SessionId } from '@/types/session';
+import { useSessionsStore } from '@/store/sessions';
 import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -21,9 +22,11 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
   const webglAddonRef = useRef<WebglAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const sessionUpdate = useSessionsStore((s) => s.sessionUpdates[sessionId]);
+  const cannotConnect = !!(sessionUpdate && sessionUpdate.is_active && !sessionUpdate.is_connectable && !sessionUpdate.is_resumable);
 
   useEffect(() => {
-    if (!terminalRef.current) return;
+    if (!terminalRef.current || cannotConnect) return;
 
     const terminal = new Terminal({
       cursorBlink: true,
@@ -206,7 +209,24 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
       fitAddonRef.current = null;
       webglAddonRef.current = null;
     };
-  }, [sessionId, projectPath]);
+  }, [sessionId, projectPath, cannotConnect]);
+
+  if (cannotConnect) {
+    return (
+      <div className="embedded-terminal">
+        <div className="terminal-toolbar">
+          <div className="terminal-toolbar-left">
+            <span className="terminal-label">Terminal</span>
+          </div>
+        </div>
+        <div style={{ padding: 'var(--space-lg)', color: 'var(--accent-orange)' }}>
+          Cannot connect to this session — it has a running process
+          (category: {sessionUpdate?.process_category ?? 'unknown'})
+          that cannot be attached to. Wait for it to finish or use tmux.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="embedded-terminal">

@@ -42,6 +42,7 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter, 
   const selectedSessionId = useSessionsStore((s) => s.selectedSessionId);
   const selectedRepositoryPath = useSessionsStore((s) => s.selectedRepositoryPath);
   const sessionStates = useSessionsStore((s) => s.sessionStates);
+  const sessionUpdates = useSessionsStore((s) => s.sessionUpdates);
   const monitoredSessionIds = useSessionsStore((s) => s.monitoredSessionIds);
   const selectSession = useSessionsStore((s) => s.selectSession);
   const selectRepository = useSessionsStore((s) => s.selectRepository);
@@ -289,6 +290,7 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter, 
                       onToggle={() => toggleWorktree(wtKey)}
                       selectedSessionId={selectedSessionId}
                       sessionStates={sessionStates}
+                      sessionUpdates={sessionUpdates}
                       monitoredSessionIds={monitoredSessionIds}
                       onSessionClick={handleSessionClick}
                       onSessionDoubleClick={handleSessionDoubleClick}
@@ -423,6 +425,7 @@ interface WorktreeNodeProps {
   onToggle: () => void;
   selectedSessionId: SessionId | null;
   sessionStates: Record<string, import('@/types/generated').SessionMonitorState>;
+  sessionUpdates: Record<string, import('@/store/sessions').SessionUpdateState>;
   monitoredSessionIds: Set<SessionId>;
   onSessionClick: (session: TaggedSession) => void;
   onSessionDoubleClick: (session: TaggedSession) => void;
@@ -438,6 +441,7 @@ const WorktreeNode: React.FC<WorktreeNodeProps> = ({
   onToggle,
   selectedSessionId,
   sessionStates,
+  sessionUpdates,
   monitoredSessionIds,
   onSessionClick,
   onSessionDoubleClick,
@@ -520,6 +524,7 @@ const WorktreeNode: React.FC<WorktreeNodeProps> = ({
                 isSelected={selectedSessionId === session.id}
                 isMonitored={monitoredSessionIds.has(session.id)}
                 monitorState={sessionStates[session.id]}
+                sessionUpdate={sessionUpdates[session.id]}
                 onClick={() => onSessionClick(session)}
                 onDoubleClick={() => onSessionDoubleClick(session)}
                 isHiddenView={isHiddenView}

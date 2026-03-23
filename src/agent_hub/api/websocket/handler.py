@@ -33,10 +33,12 @@ from agent_hub.models.ws_messages import (
     ServerMessageNotification,
     ServerMessageNotificationList,
     ServerMessageNotificationResolved,
+    ServerMessageProcessStateUpdate,
     ServerMessageSearchResults,
     ServerMessageSessionHistoryAppend,
     ServerMessageSessionsUpdated,
     ServerMessageSessionStateUpdate,
+    ServerMessageSessionUpdate,
     ServerMessageStatsUpdated,
     ServerMessageTerminalOutput,
 )
@@ -57,8 +59,7 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
         # Notification tracking
         self._notifications: dict[str, AttentionNotification] = {}
-        self._previous_status: dict[str, str] = {}  # session_id -> last status kind
-        # Map session_id -> active notification id (for resolving)
+        # Map "session_id:tool_use_id" -> notification_id (for resolving)
         self._session_notification: dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -204,72 +205,86 @@ class ConnectionManager:
         msg = ServerMessageTerminalOutput(session_key=session_key, data=data)
         await self.broadcast(msg.model_dump(mode="json"))
 
+    async def broadcast_process_state_update(
+        self, process_states: dict, unmatched_processes: list,
+    ) -> None:
+        """Broadcast a ``process_state_update`` to all clients."""
+        msg = ServerMessageProcessStateUpdate(
+            process_states=process_states,
+            unmatched_processes=unmatched_processes,
+        )
+        await self.broadcast(msg.model_dump(mode="json"))
+
     async def send_error(self, ws: WebSocket, message: str) -> None:
         """Send an ``error`` message to a single client."""
         msg = ServerMessageError(message=message)
         await self._safe_send(ws, msg.model_dump(mode="json"))
 
     # ------------------------------------------------------------------
-    # Notification helpers
+    # Notification helpers (driven by process tracker attention events)
     # ------------------------------------------------------------------
 
     @property
     def active_notifications(self) -> list[AttentionNotification]:
         """Return all unresolved notifications."""
-        return [n for n in self._notifications.values() if not n.resolved]
+        return list(self._notifications.values())
 
-    async def _check_attention_transition(
-        self, session_id: str, state: SessionMonitorState,
-        *, send_desktop: bool = True,
-    ) -> None:
-        """Detect attention state transitions and create/resolve notifications."""
-        current_kind = state.status.kind if state.status else "idle"
-        previous_kind = self._previous_status.get(session_id)
-        self._previous_status[session_id] = current_kind
+    async def handle_attention(self, entry: object) -> None:
+        """Handle a new attention event from the process tracker.
 
-        attention_kinds = {"awaiting_approval", "awaiting_question"}
+        ``entry`` is a ``_AttentionEntry`` dataclass from the tracker.
+        """
+        session_id: str = entry.session_id  # type: ignore[attr-access]
+        tool_name: str = entry.tool_name  # type: ignore[attr-access]
+        tool_use_id: str = entry.tool_use_id  # type: ignore[attr-access]
+        attention_kind: str = entry.attention_kind  # type: ignore[attr-access]
 
-        # Skip if this is the first update and not in attention state
-        # (avoids spurious transition from unknown → non-attention)
-        if previous_kind is None and current_kind not in attention_kinds:
+        # Deduplicate — one notification per (session, tool_use_id)
+        dedup_key = f"{session_id}:{tool_use_id}"
+        if dedup_key in self._session_notification:
             return
 
-        # Already have an active notification for this session — no duplicate
-        if current_kind in attention_kinds and session_id in self._session_notification:
-            return
+        notif_id = str(uuid.uuid4())
+        notification = AttentionNotification(
+            id=notif_id,
+            session_id=session_id,
+            attention_kind=attention_kind,  # type: ignore[arg-type]
+            tool_name=tool_name,
+            timestamp=datetime.now(tz=timezone.utc),
+        )
+        self._notifications[notif_id] = notification
+        self._session_notification[dedup_key] = notif_id
 
-        # Transition INTO attention state
-        if current_kind in attention_kinds:
-            tool_name = ""
-            if hasattr(state.status, "tool"):
-                tool_name = state.status.tool  # type: ignore[union-attr]
+        msg = ServerMessageNotification(notification=notification)
+        await self.broadcast(msg.model_dump(mode="json"))
 
-            notif_id = str(uuid.uuid4())
-            notification = AttentionNotification(
-                id=notif_id,
+        # Desktop notification (fire-and-forget)
+        asyncio.create_task(
+            notify_attention_needed(session_id, attention_kind, tool_name)
+        )
+
+    async def handle_attention_resolved(self, session_id: str, tool_use_id: str) -> None:
+        """Handle an attention event being resolved."""
+        dedup_key = f"{session_id}:{tool_use_id}"
+        notif_id = self._session_notification.pop(dedup_key, None)
+        if notif_id and notif_id in self._notifications:
+            del self._notifications[notif_id]
+            msg = ServerMessageNotificationResolved(
+                notification_id=notif_id,
                 session_id=session_id,
-                attention_kind=current_kind,  # type: ignore[arg-type]
-                tool_name=tool_name,
-                timestamp=datetime.now(tz=timezone.utc),
             )
-            self._notifications[notif_id] = notification
-            self._session_notification[session_id] = notif_id
-
-            # Broadcast to all clients
-            msg = ServerMessageNotification(notification=notification)
             await self.broadcast(msg.model_dump(mode="json"))
 
-            # Desktop notification (fire-and-forget)
-            if send_desktop:
-                asyncio.create_task(
-                    notify_attention_needed(session_id, current_kind, tool_name)
-                )
-
-        # Transition OUT of attention state
-        elif current_kind not in attention_kinds and previous_kind in attention_kinds:
-            notif_id = self._session_notification.pop(session_id, None)
-            if notif_id and notif_id in self._notifications:
-                self._notifications.pop(notif_id)
+    async def handle_attention_resolved_for_session(self, session_id: str) -> None:
+        """Resolve all attention notifications for a session (e.g., PID died)."""
+        to_remove = [
+            (key, nid) for key, nid in self._session_notification.items()
+            if key.startswith(f"{session_id}:")
+        ]
+        for key, notif_id in to_remove:
+            del self._session_notification[key]
+            if notif_id in self._notifications:
+                del self._notifications[notif_id]
                 msg = ServerMessageNotificationResolved(
                     notification_id=notif_id,
                     session_id=session_id,
@@ -300,7 +315,6 @@ async def _on_session_state_update(
     session_id: str, state: SessionMonitorState
 ) -> None:
     """Callback invoked by file watchers when a session state changes."""
-    await manager._check_attention_transition(session_id, state)
     await manager.broadcast_session_state(session_id, state)
 
 
@@ -309,6 +323,35 @@ async def _on_session_history_append(
 ) -> None:
     """Callback invoked by file watchers when new JSONL entries are parsed."""
     await manager.broadcast_session_history_append(session_id, entries, total_lines)
+
+
+async def _on_attention_event(entry: object) -> None:
+    """Callback invoked by the process tracker when an attention event arrives."""
+    try:
+        await manager.handle_attention(entry)
+    except Exception:
+        logger.exception("Error handling attention event")
+
+
+async def _on_attention_resolved(session_id: str, tool_use_id: str) -> None:
+    """Callback invoked by the process tracker when attention is resolved."""
+    try:
+        await manager.handle_attention_resolved(session_id, tool_use_id)
+    except Exception:
+        logger.exception("Error handling attention resolved")
+
+
+async def _on_process_state_update() -> None:
+    """Callback invoked by the process tracker when state changes."""
+    try:
+        # Access the tracker via a simple import — it will be wired
+        # from the same provider that called register_provider_callbacks.
+        tracker = _on_process_state_update._tracker  # type: ignore[attr-defined]
+        states = tracker.get_all_process_states()
+        unmatched = tracker.get_unmatched_processes()
+        await manager.broadcast_process_state_update(states, unmatched)
+    except Exception:
+        logger.exception("Error broadcasting process state update")
 
 
 async def _on_claude_stats_update(stats: GlobalStatsCache | None) -> None:
@@ -321,17 +364,117 @@ async def _on_codex_stats_update(stats: GlobalStatsCache | None) -> None:
         await manager.broadcast_stats_updated("codex", stats)
 
 
+async def _on_unified_session_update(session_id: str) -> None:
+    """Broadcast a unified ``session_update`` from the SessionManager."""
+    try:
+        sm = _on_unified_session_update._provider.session_manager  # type: ignore[attr-defined]
+        session = sm.get_session(session_id)
+        if session is None:
+            return
+
+        notifications: list[AttentionNotification] = []
+        for a in session.pending_attention:
+            notifications.append(
+                AttentionNotification(
+                    id=f"{a.session_id}:{a.tool_use_id}",
+                    session_id=a.session_id,
+                    attention_kind=a.attention_kind,  # type: ignore[arg-type]
+                    tool_name=a.tool_name,
+                    timestamp=datetime.fromtimestamp(a.ts, tz=timezone.utc) if a.ts else datetime.now(tz=timezone.utc),
+                )
+            )
+
+        msg = ServerMessageSessionUpdate(
+            session_id=session_id,
+            is_active=session.is_active,
+            is_connectable=session.is_connectable,
+            is_resumable=session.is_resumable,
+            needs_attention=session.needs_attention,
+            effective_status=session.effective_status,
+            process_category=session.process.category if session.process else None,
+            process_pid=session.process.pid if session.process else None,
+            terminal_key=session.terminal_key,
+            monitor_state=session.monitor_state,
+            notifications=notifications,
+        )
+        await manager.broadcast(msg.model_dump(mode="json"))
+    except Exception:
+        logger.exception("Error broadcasting unified session update for %s", session_id)
+
+
 def register_provider_callbacks(provider: Any) -> None:
     """Wire the WebSocket manager into provider services so that state
     changes are automatically broadcast to connected clients.
 
     Call this once during FastAPI app startup.
     """
-    # Session file watchers
+    # Session file watchers (kept for session_state_update + history append)
     provider.claude_watcher.on_state_update(_on_session_state_update)
     provider.codex_watcher.on_state_update(_on_session_state_update)
     provider.claude_watcher.on_history_append(_on_session_history_append)
     provider.codex_watcher.on_history_append(_on_session_history_append)
+
+    # Wire transcript-based attention resolution: when a tool_result arrives
+    # for a tool_use_id that has a pending attention entry, resolve it.
+    async def _on_tool_result(session_id: str, tool_use_id: str) -> None:
+        try:
+            provider.process_tracker.resolve_attention(session_id, tool_use_id)
+        except Exception:
+            logger.exception("Error resolving attention from tool_result")
+
+    provider.claude_watcher.on_tool_result(_on_tool_result)
+    provider.codex_watcher.on_tool_result(_on_tool_result)
+
+    # Process tracker (old paths remain for backward compat)
+    try:
+        _on_process_state_update._tracker = provider.process_tracker  # type: ignore[attr-defined]
+        provider.process_tracker.on_update(_on_process_state_update)
+        provider.process_tracker.on_attention(_on_attention_event)
+        provider.process_tracker.on_attention_resolved(_on_attention_resolved)
+    except AttributeError:
+        pass
+
+    # --- SessionManager wiring ---
+    try:
+        sm = provider.session_manager
+
+        # Process tracker -> SessionManager
+        provider.process_tracker.on_update(sm.handle_process_update)
+        provider.process_tracker.on_attention(sm.handle_attention)
+        provider.process_tracker.on_attention_resolved(sm.handle_attention_resolved)
+
+        # File watchers -> SessionManager
+        provider.claude_watcher.on_state_update(sm.handle_monitor_state_update)
+        provider.codex_watcher.on_state_update(sm.handle_monitor_state_update)
+
+        # Tool result resolution via SessionManager
+        async def _sm_tool_result(session_id: str, tool_use_id: str) -> None:
+            await sm.handle_attention_resolved(session_id, tool_use_id)
+
+        provider.claude_watcher.on_tool_result(_sm_tool_result)
+        provider.codex_watcher.on_tool_result(_sm_tool_result)
+
+        # Session discovery -> SessionManager
+        provider.claude_monitor.on_refresh(
+            lambda sessions: asyncio.ensure_future(
+                sm.sync_discovered_sessions(sessions, "claude")
+            )
+        )
+        provider.codex_monitor.on_refresh(
+            lambda sessions: asyncio.ensure_future(
+                sm.sync_discovered_sessions(sessions, "codex")
+            )
+        )
+
+        # Unified broadcast
+        _on_unified_session_update._provider = provider  # type: ignore[attr-defined]
+        sm.on_session_update(_on_unified_session_update)
+
+        # Initial sync — the tracker already ran start() before callbacks
+        # were wired, so we must pull current state explicitly.
+        asyncio.ensure_future(sm.handle_process_update())
+    except Exception:
+        logger.exception("Failed to wire SessionManager callbacks")
 
     # Stats services
     try:

@@ -4,6 +4,8 @@ import { useSessionsStore } from '@/store/sessions';
 import { useHostsStore } from '@/store/hosts';
 import { useStatsStore } from '@/store/stats';
 import { useNotificationsStore } from '@/store/notifications';
+// NOTE: notification WS messages are now superseded by session_update,
+// but we keep backward-compat handlers for old backends.
 import { historyAppendBus } from '@/store/sessions';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
 import { SessionId } from '@/types/session';
@@ -57,6 +59,19 @@ export function useWebSocket() {
             message.total_lines,
           );
           break;
+        case 'session_update': {
+          const sid = SessionId.wrap(message.session_id, seq);
+          useSessionsStore.getState().setSessionUpdate(sid, message);
+          // Also update monitor state if present
+          if (message.monitor_state) {
+            setSessionState(sid, message.monitor_state);
+          }
+          // Auto-resolve notifications when attention clears
+          if (!message.needs_attention) {
+            resolveBySessionId(sid);
+          }
+          break;
+        }
         case 'terminal_output':
           break;
         case 'search_results':

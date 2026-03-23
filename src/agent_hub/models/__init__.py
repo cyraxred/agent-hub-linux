@@ -64,6 +64,14 @@ from agent_hub.models.search import (
     SessionSearchResult,
 )
 
+# process_info.py
+from agent_hub.models.process_info import (
+    ClaudeProcessCategory,
+    ClaudeProcessInfo,
+    SessionProcessState,
+    UnmatchedClaudeProcess,
+)
+
 # ws_messages.py
 from agent_hub.models.ws_messages import (
     AttentionNotification,
@@ -77,10 +85,12 @@ from agent_hub.models.ws_messages import (
     ClientMessageUnsubscribeSession,
     ServerMessage,
     ServerMessageError,
+    ServerMessageProcessStateUpdate,
     ServerMessageNotification,
     ServerMessageNotificationList,
     ServerMessageNotificationResolved,
     ServerMessageSearchResults,
+    ServerMessageSessionUpdate,
     ServerMessageSessionsUpdated,
     ServerMessageSessionStateUpdate,
     ServerMessageStatsUpdated,
@@ -194,6 +204,11 @@ __all__ = [
     "SearchMatchField",
     "SessionIndexEntry",
     "SessionSearchResult",
+    # process_info
+    "ClaudeProcessCategory",
+    "ClaudeProcessInfo",
+    "SessionProcessState",
+    "UnmatchedClaudeProcess",
     # ws_messages
     "AttentionNotification",
     "ClientMessage",
@@ -205,11 +220,13 @@ __all__ = [
     "ServerMessage",
     "SessionHistoryEntry",
     "ServerMessageError",
+    "ServerMessageProcessStateUpdate",
     "ServerMessageSessionHistoryAppend",
     "ServerMessageNotification",
     "ServerMessageNotificationList",
     "ServerMessageNotificationResolved",
     "ServerMessageSearchResults",
+    "ServerMessageSessionUpdate",
     "ServerMessageSessionsUpdated",
     "ServerMessageSessionStateUpdate",
     "ServerMessageStatsUpdated",

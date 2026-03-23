@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { CLISession, SelectedRepository, SessionMonitorState, SessionHistoryEntry, WorktreeBranch } from '@/types/generated';
+import type { CLISession, SelectedRepository, SessionMonitorState, SessionHistoryEntry, WorktreeBranch, ServerMessageSessionUpdate } from '@/types/generated';
 import { api, createApiForHost } from '@/api/client';
 import { useNotificationsStore } from '@/store/notifications';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
@@ -48,6 +48,18 @@ export interface HostedRepository extends Omit<SelectedRepository, 'worktrees'> 
   worktrees?: TaggedWorktreeBranch[];
 }
 
+/** Unified session state from the backend's session_update WS message. */
+export interface SessionUpdateState {
+  is_active: boolean;
+  is_connectable: boolean;
+  is_resumable: boolean;
+  needs_attention: boolean;
+  effective_status: string;
+  process_category?: string | null;
+  process_pid?: number | null;
+  terminal_key?: string | null;
+}
+
 interface SessionsState {
   /** Repository tree (repos → worktrees → sessions), annotated with host_id. */
   repositories: HostedRepository[];
@@ -55,6 +67,8 @@ interface SessionsState {
   _reposByHost: Record<string, HostedRepository[]>;
   /** Session states keyed by session ID (from WS session_state_update). */
   sessionStates: Record<string, SessionMonitorState>;
+  /** Unified session update state keyed by session ID (from WS session_update). */
+  sessionUpdates: Record<string, SessionUpdateState>;
   /** Session IDs currently being monitored. */
   monitoredSessionIds: Set<SessionId>;
   /** Subscription info for monitored sessions. */
@@ -97,6 +111,8 @@ interface SessionsState {
 
   /** Called by WS hook when session_state_update arrives. */
   setSessionState: (sessionId: SessionId, state: SessionMonitorState) => void;
+  /** Called by WS hook when session_update arrives. */
+  setSessionUpdate: (sessionId: SessionId, update: ServerMessageSessionUpdate) => void;
   /** Called by WS hook when sessions_updated arrives (legacy — routes to setHostRepositories). */
   setRepositories: (repos: SelectedRepository[]) => void;
   /** Called by WS hook when sessions_updated arrives for a specific host. */
@@ -107,6 +123,7 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   repositories: [],
   _reposByHost: {},
   sessionStates: {},
+  sessionUpdates: {},
   monitoredSessionIds: new Set<SessionId>(),
   monitoredSessionInfo: {},
   selectedSessionId: null,
@@ -348,6 +365,24 @@ export const useSessionsStore = create<SessionsState>((set, get) => ({
   setSessionState: (sessionId, state) => {
     set((s) => ({
       sessionStates: { ...s.sessionStates, [sessionId]: state },
+    }));
+  },
+
+  setSessionUpdate: (sessionId, update) => {
+    set((s) => ({
+      sessionUpdates: {
+        ...s.sessionUpdates,
+        [sessionId]: {
+          is_active: update.is_active ?? false,
+          is_connectable: update.is_connectable ?? false,
+          is_resumable: update.is_resumable ?? true,
+          needs_attention: update.needs_attention ?? false,
+          effective_status: update.effective_status ?? 'idle',
+          process_category: update.process_category,
+          process_pid: update.process_pid,
+          terminal_key: update.terminal_key,
+        },
+      },
     }));
   },
 
