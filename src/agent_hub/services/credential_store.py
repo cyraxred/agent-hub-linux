@@ -15,7 +15,8 @@ _SERVICE_NAME = "agent-hub"
 class CredentialStore:
     """Stores secrets in the OS keyring (GNOME Keyring, KDE Wallet, etc.).
 
-    Falls back to an encrypted JSON file if no keyring backend is available.
+    Falls back to a permission-protected JSON file (0o600) if no keyring
+    backend is available.
     """
 
     def __init__(self, data_dir: str | Path) -> None:

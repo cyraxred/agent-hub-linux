@@ -30,7 +30,7 @@ class SessionMetadataRow(Base):
 
 
 class AuthTokenRow(Base):
-    """Persistent auth token bound to a client IP."""
+    """Persistent auth token with explicit expiry."""
 
     __tablename__ = "auth_tokens"
 
@@ -40,6 +40,11 @@ class AuthTokenRow(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(tz=timezone.utc),
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
     )
 
 
@@ -69,10 +74,32 @@ class MetadataStore:
             self._engine, expire_on_commit=False
         )
 
+    def session(self) -> AsyncSession:
+        """Return a new async session. Use as ``async with store.session() as s:``."""
+        return self._session_factory()
+
     async def init_db(self) -> None:
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist, and migrate schema if needed."""
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # Migrate: add expires_at column to auth_tokens if missing
+            await conn.execute(
+                # SQLite ADD COLUMN is a no-op if the column already exists
+                # when wrapped in a try/except.
+                __import__("sqlalchemy").text(
+                    "ALTER TABLE auth_tokens ADD COLUMN expires_at DATETIME"
+                )
+            ) if not await self._column_exists(conn, "auth_tokens", "expires_at") else None
+
+    @staticmethod
+    async def _column_exists(conn: object, table: str, column: str) -> bool:
+        from sqlalchemy import text
+
+        result = await conn.execute(text(f"PRAGMA table_info({table})"))  # type: ignore[union-attr]
+        for row in result:
+            if row[1] == column:
+                return True
+        return False
 
     async def close(self) -> None:
         """Dispose of the engine."""

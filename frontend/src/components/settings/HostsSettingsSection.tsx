@@ -18,16 +18,6 @@ function statusColor(status: ConnectionStatus): string {
   }
 }
 
-function statusLabel(status: ConnectionStatus): string {
-  switch (status) {
-    case 'connected': return 'Connected';
-    case 'connecting': return 'Connecting...';
-    case 'auth_required': return 'Auth required';
-    case 'error': return 'Error';
-    default: return 'Disconnected';
-  }
-}
-
 interface HostFormState {
   label: string;
   kind: 'direct' | 'ssh';

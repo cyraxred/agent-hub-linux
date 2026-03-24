@@ -242,7 +242,7 @@ interface HostConnectReq {
   ssh_key: string;
   remote_port: number;
 }
-interface HostConnectResp { host_id: string; connected: boolean; auth_required: boolean }
+interface HostConnectResp { host_id: string; connected: boolean; auth_required: boolean; remote_error: string | null }
 interface ConnectedHostsResp { host_ids: string[] }
 
 export interface HostInstallStatus {

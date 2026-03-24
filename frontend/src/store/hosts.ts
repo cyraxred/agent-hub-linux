@@ -138,7 +138,6 @@ export const useHostsStore = create<HostsState>()(
           });
 
           if (resp.auth_required) {
-            // Remote requires PAM authentication — UI will show prompt
             set((s) => ({
               runtimeState: {
                 ...s.runtimeState,
@@ -149,7 +148,7 @@ export const useHostsStore = create<HostsState>()(
             set((s) => ({
               runtimeState: {
                 ...s.runtimeState,
-                [id]: { status: 'connected', error: null },
+                [id]: { status: 'connected', error: resp.remote_error ?? null },
               },
             }));
             // Refresh repos so the newly-connected host's sessions appear

@@ -56,13 +56,13 @@ pip install --upgrade "$WHEEL_PATH" 2>&1
 if command -v systemctl &>/dev/null; then
     echo "Configuring systemd user service..."
     mkdir -p ~/.config/systemd/user
-    cat > ~/.config/systemd/user/agent-hub.service << 'UNIT'
+    cat > ~/.config/systemd/user/agent-hub.service << UNIT
 [Unit]
 Description=Agent Hub
 After=network.target
 
 [Service]
-ExecStart=%INSTALL_DIR%/.venv/bin/agent-hub
+ExecStart=$INSTALL_DIR/.venv/bin/agent-hub
 Environment=AGENT_HUB_API_HOST=127.0.0.1
 Restart=on-failure
 RestartSec=5
@@ -70,8 +70,6 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 UNIT
-    # Fix the ExecStart path (shell variable expansion doesn't work in heredocs with single quotes)
-    sed -i "s|%INSTALL_DIR%|$INSTALL_DIR|g" ~/.config/systemd/user/agent-hub.service
 
     # 5. Enable and start (user-level systemd, no root)
     systemctl --user daemon-reload

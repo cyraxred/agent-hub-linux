@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
@@ -68,6 +68,7 @@ class ConnectResponse(BaseModel):
     host_id: str
     connected: bool = True
     auth_required: bool = False
+    remote_error: str | None = None
 
 
 class AuthenticateRequest(BaseModel):
@@ -163,6 +164,7 @@ async def connect_host(body: ConnectRequest, request: Request) -> ConnectRespons
 
     # Check if the remote backend requires PAM authentication
     auth_required = False
+    remote_error: str | None = None
     hs = proxy.get(body.id)
     if hs is not None:
         # Try to use a stored token first
@@ -171,13 +173,18 @@ async def connect_host(body: ConnectRequest, request: Request) -> ConnectRespons
         if stored_token:
             hs.remote_auth_token = stored_token
 
-        auth_required = await _check_remote_auth(hs)
+        auth_required, remote_error = await _check_remote_auth(hs)
 
-    return ConnectResponse(host_id=body.id, auth_required=auth_required)
+    return ConnectResponse(
+        host_id=body.id, auth_required=auth_required, remote_error=remote_error
+    )
 
 
-async def _check_remote_auth(hs: HostSession) -> bool:
-    """Probe the remote backend's auth status. Returns True if auth is needed."""
+async def _check_remote_auth(hs: HostSession) -> tuple[bool, str | None]:
+    """Probe the remote backend's auth status.
+
+    Returns ``(auth_required, error_message)``.
+    """
     import aiohttp
 
     session: aiohttp.ClientSession = hs.http_session  # type: ignore[assignment]
@@ -189,11 +196,13 @@ async def _check_remote_auth(hs: HostSession) -> bool:
             f"{hs.base_url}/api/auth/status", cookies=cookies
         ) as resp:
             if resp.status != 200:
-                return False  # Remote doesn't have auth routes — no auth needed
+                return False, None  # Remote doesn't have auth routes — no auth needed
             data = await resp.json()
-            return not data.get("authenticated", True)
-    except Exception:
-        return False  # Can't reach remote auth endpoint — assume no auth
+            return not data.get("authenticated", True), None
+    except aiohttp.ClientError as exc:
+        return False, f"Remote unreachable: {exc}"
+    except Exception as exc:
+        return False, f"Remote probe failed: {exc}"
 
 
 @router.post("/{host_id}/authenticate", response_model=AuthenticateResponse)
@@ -250,6 +259,9 @@ async def disconnect_host(host_id: str, request: Request) -> DisconnectResponse:
     """Disconnect from a remote backend and release its session."""
     proxy = _get_proxy(request)
     await proxy.disconnect(host_id)
+    # Clean up stale remote auth token
+    cred_store = request.app.state.provider.credential_store
+    cred_store.delete(f"host:{host_id}:remote_token")
     return DisconnectResponse(host_id=host_id)
 
 
@@ -337,16 +349,21 @@ async def install_remote(
 
 
 @router.get("/{host_id}/install-status", response_model=InstallStatusResponse)
-async def install_status(host_id: str, request: Request) -> InstallStatusResponse:
+async def install_status(
+    host_id: str,
+    request: Request,
+    ssh_host: str = Query("", description="SSH hostname"),
+    ssh_port: int = Query(22, description="SSH port"),
+    ssh_user: str = Query("", description="SSH username"),
+) -> InstallStatusResponse:
     """Check whether Agent Hub is installed and running on a remote host.
 
     SSH params are passed as query params (acceptable for GET — no secrets).
     """
-    params = request.query_params
     body = InstallRequest(
-        ssh_host=params.get("ssh_host", ""),
-        ssh_port=int(params.get("ssh_port", "22")),
-        ssh_user=params.get("ssh_user", ""),
+        ssh_host=ssh_host,
+        ssh_port=ssh_port,
+        ssh_user=ssh_user,
     )
 
     try:

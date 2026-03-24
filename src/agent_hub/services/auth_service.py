@@ -6,6 +6,7 @@ import asyncio
 import logging
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 
 from agent_hub.services.metadata_store import AuthTokenRow, MetadataStore
 
@@ -15,6 +16,11 @@ logger = logging.getLogger(__name__)
 _LOCKOUT_THRESHOLD = 5
 _LOCKOUT_WINDOW = 300  # 5 minutes
 _LOCKOUT_DURATION = 900  # 15 minutes
+
+# Default token lifetime.
+_TOKEN_MAX_AGE = timedelta(days=30)
+
+_LOOPBACK_IPS = frozenset({"127.0.0.1", "::1"})
 
 
 class AuthService:
@@ -69,34 +75,71 @@ class AuthService:
     # Token CRUD
     # ------------------------------------------------------------------
 
-    async def create_token(self, username: str, client_ip: str) -> str:
-        """Create a new auth token bound to the given IP."""
+    async def create_token(
+        self,
+        username: str,
+        client_ip: str,
+        max_age: timedelta = _TOKEN_MAX_AGE,
+    ) -> str:
+        """Create a new auth token with an explicit expiry.
+
+        Tokens issued to loopback IPs (127.0.0.1, ::1) are IP-bound —
+        they can only be validated from loopback.  Tokens issued to
+        remote IPs skip the IP check (remote IPs rotate across NATs/VPNs).
+        """
         token = secrets.token_urlsafe(48)
-        async with self._store._session_factory() as session:
+        now = datetime.now(tz=timezone.utc)
+        async with self._store.session() as session:
             row = AuthTokenRow(
                 token=token,
                 username=username,
                 client_ip=client_ip,
+                created_at=now,
+                expires_at=now + max_age,
             )
             session.add(row)
             await session.commit()
         return token
 
     async def validate_token(self, token: str, client_ip: str) -> str | None:
-        """Validate a token and check IP binding. Returns username or None."""
-        async with self._store._session_factory() as session:
+        """Validate a token. Returns username or None.
+
+        - Expired tokens are rejected.
+        - Tokens issued to loopback are only valid from loopback.
+        - Tokens issued to remote IPs are valid from any IP.
+        """
+        async with self._store.session() as session:
             row = await session.get(AuthTokenRow, token)
             if row is None:
                 return None
-            if row.client_ip != client_ip:
+            # Check expiry — force UTC comparison (SQLite may return naive datetimes)
+            now = datetime.now(tz=timezone.utc)
+            expires_at = row.expires_at.replace(tzinfo=timezone.utc) if row.expires_at.tzinfo is None else row.expires_at
+            if expires_at <= now:
+                # Clean up expired token
+                await session.delete(row)
+                await session.commit()
+                return None
+            # Localhost-issued tokens must only be used from localhost
+            if row.client_ip in _LOOPBACK_IPS and client_ip not in _LOOPBACK_IPS:
                 return None
             return row.username
+
+    async def invalidate_token(self, token: str) -> bool:
+        """Delete a single token. Returns True if it existed."""
+        async with self._store.session() as session:
+            row = await session.get(AuthTokenRow, token)
+            if row is None:
+                return False
+            await session.delete(row)
+            await session.commit()
+            return True
 
     async def invalidate_all(self) -> int:
         """Delete all auth tokens. Returns count of deleted tokens."""
         from sqlalchemy import delete
 
-        async with self._store._session_factory() as session:
+        async with self._store.session() as session:
             result = await session.execute(delete(AuthTokenRow))
             await session.commit()
             return result.rowcount or 0

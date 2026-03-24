@@ -93,7 +93,11 @@ async def login(body: LoginRequest, request: Request) -> JSONResponse:
 
 @router.post("/logout")
 async def logout(request: Request) -> JSONResponse:
-    """Clear the auth cookie."""
+    """Invalidate the server-side token and clear the auth cookie."""
+    auth_service = _get_auth_service(request)
+    token = request.cookies.get("agent_hub_token")
+    if token:
+        await auth_service.invalidate_token(token)
     response = JSONResponse(content={"authenticated": False})
     response.delete_cookie("agent_hub_token", path="/")
     return response
