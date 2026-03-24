@@ -15,13 +15,11 @@ import asyncio
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from watchdog.events import FileModifiedEvent, FileSystemEventHandler
-from watchdog.observers import Observer
+from agent_hub.services.file_watcher import FileWatcher
 
 from agent_hub.models.process_info import (
     ClaudeProcessCategory,
@@ -157,24 +155,6 @@ def _has_tmux_ancestor(pid: int, max_depth: int = 20) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# File-change handler for watchdog
-# ---------------------------------------------------------------------------
-
-
-class _SessionsFileHandler(FileSystemEventHandler):
-    """Watchdog handler that fires a callback when sessions.jsonl changes."""
-
-    def __init__(self, callback: Callable, loop: asyncio.AbstractEventLoop) -> None:
-        super().__init__()
-        self._callback = callback
-        self._loop = loop
-
-    def on_modified(self, event: FileModifiedEvent) -> None:  # type: ignore[override]
-        if not event.is_directory and str(event.src_path).endswith("sessions.jsonl"):
-            asyncio.run_coroutine_threadsafe(self._callback(), self._loop)
-
-
-# ---------------------------------------------------------------------------
 # ClaudeProcessTracker
 # ---------------------------------------------------------------------------
 
@@ -209,7 +189,8 @@ class ClaudeProcessTracker:
         self._attention_resolved_callbacks: list[Callable] = []
 
         # Background tasks
-        self._observer: Observer | None = None
+        self._file_watcher = FileWatcher.get_instance()
+        self._file_watch_cb: Callable | None = None  # stored for unwatch
         self._refresh_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
@@ -317,14 +298,16 @@ class ClaudeProcessTracker:
                 if pid not in self._pid_category:
                     self._pid_category[pid] = self._classify_pid(pid)
 
-            # 4. Start watchdog on ~/.claude/agent-hub/ for sessions.jsonl changes
-            if self._agent_hub_dir.is_dir():
-                loop = asyncio.get_event_loop()
-                handler = _SessionsFileHandler(self._on_sessions_file_changed, loop)
-                self._observer = Observer()
-                self._observer.daemon = True
-                self._observer.schedule(handler, str(self._agent_hub_dir), recursive=False)
-                self._observer.start()
+            # 4. Watch sessions.jsonl via singleton FileWatcher
+            if self._sessions_file.parent.is_dir():
+                async def _on_file_event(event_type: str, file_path: str) -> None:
+                    if event_type == "modified" and file_path == str(self._sessions_file):
+                        await self._on_sessions_file_changed()
+
+                self._file_watch_cb = _on_file_event
+                self._file_watcher.watch_file(
+                    str(self._sessions_file), _on_file_event
+                )
 
             # 5. Start periodic refresh
             self._refresh_task = asyncio.create_task(self._periodic_refresh())
@@ -338,9 +321,11 @@ class ClaudeProcessTracker:
 
     async def stop(self) -> None:
         """Stop all background work."""
-        if self._observer is not None:
-            self._observer.stop()
-            self._observer = None
+        if self._file_watch_cb is not None:
+            self._file_watcher.unwatch_file(
+                str(self._sessions_file), self._file_watch_cb
+            )
+            self._file_watch_cb = None
         if self._refresh_task is not None:
             self._refresh_task.cancel()
             try:

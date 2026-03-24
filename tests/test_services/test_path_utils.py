@@ -152,13 +152,13 @@ class TestProjectPathFromSessionDir:
         session_dir = projects_dir / "-home-user-myproject"
         session_dir.mkdir(parents=True)
 
-        result = project_path_from_session_dir(session_dir, projects_dir)
+        result = project_path_from_session_dir(session_dir)
         assert result == "/home/user/myproject"
 
-    def test_unrelated_path(self, tmp_path: Path) -> None:
+    def test_encoded_name(self, tmp_path: Path) -> None:
         projects_dir = tmp_path / "projects"
-        projects_dir.mkdir()
-        session_dir = Path("/completely/different/path")
+        session_dir = projects_dir / "-tmp-foo"
+        session_dir.mkdir(parents=True)
 
-        result = project_path_from_session_dir(session_dir, projects_dir)
-        assert result == "/completely/different/path"
+        result = project_path_from_session_dir(session_dir)
+        assert result == "/tmp/foo"

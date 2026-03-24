@@ -6,20 +6,18 @@ import logging
 from typing import TYPE_CHECKING
 
 from agent_hub.config.settings import Settings
-from agent_hub.services.cli_session_monitor import CLISessionMonitorService
-from agent_hub.services.codex_file_watcher import CodexSessionFileWatcher
 from agent_hub.services.codex_search_service import CodexSearchService
-from agent_hub.services.codex_session_monitor import CodexSessionMonitorService
 from agent_hub.services.codex_stats_service import CodexGlobalStatsService
 from agent_hub.services.dev_server_manager import DevServerManager
+from agent_hub.services.file_watcher import FileWatcher
 from agent_hub.services.global_search_service import GlobalSearchService
 from agent_hub.services.global_stats_service import GlobalStatsService
 from agent_hub.services.metadata_store import MetadataStore
 from agent_hub.services.claude_process_tracker import ClaudeProcessTracker
 from agent_hub.services.process_registry import ProcessRegistry
-from agent_hub.services.session_file_watcher import SessionFileWatcher
 from agent_hub.services.session_manager import SessionManager
 from agent_hub.services.session_parse_cache import SessionParseCache
+from agent_hub.services.transcript_registry import TranscriptRegistry
 
 if TYPE_CHECKING:
     from agent_hub.services import git_worktree_service as _git_mod
@@ -29,46 +27,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _resolve_encoded_path(encoded: str) -> str | None:
-    """Resolve a Claude-encoded project folder name back to a real filesystem path.
 
-    Claude encodes paths by stripping the leading ``/`` and replacing every
-    ``/`` with ``-``.  This is ambiguous when directory names contain dashes.
-
-    We greedily walk the encoded segments: at each step we try extending the
-    current component with a ``-`` (i.e. the dash was literal) before trying
-    a ``/`` (i.e. the dash was a separator).  This prefers longer directory
-    names, which resolves the ambiguity for names like ``agent-hub-linux``.
-    """
-    from pathlib import Path
-
-    if not encoded or encoded == "-":
-        return "/"
-
-    # Strip leading dash(es) that represent the root /
-    stripped = encoded.lstrip("-")
-    parts = stripped.split("-")
-    if not parts:
-        return None
-
-    def _walk(idx: int, current: str) -> str | None:
-        if idx == len(parts):
-            return current if Path(current).is_dir() else None
-
-        # Try greedily joining with dash first (literal dash in name)
-        # by looking ahead and combining multiple segments.
-        # We try longest match first to prefer "agent-hub-linux" over "agent/hub/linux".
-        for end in range(len(parts), idx, -1):
-            candidate_segment = "-".join(parts[idx:end])
-            candidate_path = current + "/" + candidate_segment
-            if Path(candidate_path).is_dir():
-                result = _walk(end, candidate_path)
-                if result is not None:
-                    return result
-
-        return None
-
-    return _walk(0, "")
+# resolve_encoded_path is now in path_utils
 
 
 class AgentHubProvider:
@@ -83,10 +43,6 @@ class AgentHubProvider:
         self._settings = settings
 
         # Private backing stores — ``None`` means "not yet created"
-        self._claude_monitor: CLISessionMonitorService | None = None
-        self._codex_monitor: CodexSessionMonitorService | None = None
-        self._claude_watcher: SessionFileWatcher | None = None
-        self._codex_watcher: CodexSessionFileWatcher | None = None
         self._parse_cache: SessionParseCache | None = None
         self._git_service_module: _git_mod | None = None
         self._stats_service: GlobalStatsService | None = None
@@ -101,6 +57,9 @@ class AgentHubProvider:
         self._auth_service: AuthService | None = None
         self._credential_store: CredentialStore | None = None
         self._proxy_service: object | None = None  # ProxyService — imported lazily
+        self._file_watcher: FileWatcher | None = None
+        self._claude_transcript_registry: TranscriptRegistry | None = None
+        self._codex_transcript_registry: TranscriptRegistry | None = None
 
     # ------------------------------------------------------------------
     # Read-only access to settings
@@ -115,23 +74,6 @@ class AgentHubProvider:
     # ------------------------------------------------------------------
 
     @property
-    def claude_monitor(self) -> CLISessionMonitorService:
-        if self._claude_monitor is None:
-            self._claude_monitor = CLISessionMonitorService(
-                claude_data_path=self._settings.claude_data_path,
-                metadata_store=self.metadata_store,
-            )
-        return self._claude_monitor
-
-    @property
-    def codex_monitor(self) -> CodexSessionMonitorService:
-        if self._codex_monitor is None:
-            self._codex_monitor = CodexSessionMonitorService(
-                codex_data_path=self._settings.codex_data_path,
-            )
-        return self._codex_monitor
-
-    @property
     def parse_cache(self) -> SessionParseCache:
         if self._parse_cache is None:
             self._parse_cache = SessionParseCache(
@@ -139,26 +81,6 @@ class AgentHubProvider:
                 approval_timeout_seconds=self._settings.approval_timeout_seconds,
             )
         return self._parse_cache
-
-    @property
-    def claude_watcher(self) -> SessionFileWatcher:
-        if self._claude_watcher is None:
-            self._claude_watcher = SessionFileWatcher(
-                claude_path=self._settings.claude_data_path,
-                approval_timeout_seconds=self._settings.approval_timeout_seconds,
-                parse_cache=self.parse_cache,
-            )
-        return self._claude_watcher
-
-    @property
-    def codex_watcher(self) -> CodexSessionFileWatcher:
-        if self._codex_watcher is None:
-            self._codex_watcher = CodexSessionFileWatcher(
-                codex_path=self._settings.codex_data_path,
-                approval_timeout_seconds=self._settings.approval_timeout_seconds,
-                parse_cache=self.parse_cache,
-            )
-        return self._codex_watcher
 
     @property
     def git_service(self) -> _git_mod:
@@ -261,13 +183,60 @@ class AgentHubProvider:
             self._dev_server_manager = DevServerManager()
         return self._dev_server_manager
 
+    @property
+    def file_watcher(self) -> FileWatcher:
+        if self._file_watcher is None:
+            self._file_watcher = FileWatcher.get_instance()
+        return self._file_watcher
+
+    @property
+    def claude_transcript_registry(self) -> TranscriptRegistry:
+        if self._claude_transcript_registry is None:
+            from agent_hub.services.session_jsonl_parser import (
+                ParseResult as ClaudeParseResult,
+                parse_new_lines as claude_parse_new_lines,
+            )
+
+            self._claude_transcript_registry = TranscriptRegistry(
+                provider="claude",
+                parse_fn=claude_parse_new_lines,
+                parse_result_factory=ClaudeParseResult,
+                approval_timeout_seconds=self._settings.approval_timeout_seconds,
+                parse_cache=self.parse_cache,
+                file_watcher=self.file_watcher,
+            )
+        return self._claude_transcript_registry
+
+    @property
+    def codex_transcript_registry(self) -> TranscriptRegistry:
+        if self._codex_transcript_registry is None:
+            from agent_hub.services.codex_jsonl_parser import (
+                ParseResult as CodexParseResult,
+                parse_new_lines as codex_parse_new_lines,
+            )
+
+            self._codex_transcript_registry = TranscriptRegistry(
+                provider="codex",
+                parse_fn=codex_parse_new_lines,
+                parse_result_factory=CodexParseResult,
+                approval_timeout_seconds=self._settings.approval_timeout_seconds,
+                parse_cache=self.parse_cache,
+                file_watcher=self.file_watcher,
+            )
+        return self._codex_transcript_registry
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def init(self) -> None:
         """Initialise the database and start background watchers."""
+        import asyncio
+
         logger.info("Initialising AgentHubProvider...")
+
+        # 0. Set the event loop on the singleton FileWatcher
+        self.file_watcher.set_loop(asyncio.get_event_loop())
 
         # 1. Database
         await self.metadata_store.init_db()
@@ -290,10 +259,7 @@ class AgentHubProvider:
         codex_indexed = await self.codex_search.indexed_session_count()
         logger.info("Codex search index built (%d sessions)", codex_indexed)
 
-        # 5. Auto-discover repositories from session files
-        await self._auto_discover_repositories()
-
-        # 6. Install session hooks and start process tracker
+        # 5. Install session hooks and start process tracker
         try:
             from agent_hub.services.hook_installer import ensure_hooks_installed
 
@@ -305,67 +271,74 @@ class AgentHubProvider:
         await self.process_tracker.start()
         logger.info("ClaudeProcessTracker started")
 
+        # 6. Start transcript registries and wire into SessionManager
+        await self.claude_transcript_registry.start()
+        await self.codex_transcript_registry.start()
+        logger.info("Transcript registries started")
+
         await self.session_manager.start()
         self.session_manager.set_tracker(self.process_tracker)
         self.session_manager.set_process_registry(self.process_registry)
-        logger.info("SessionManager started")
+        self.session_manager.set_transcript_registry(
+            claude_registry=self.claude_transcript_registry,
+            codex_registry=self.codex_transcript_registry,
+            claude_data_path=self._settings.claude_data_path,
+        )
+
+        # Wire transcript registry → SessionManager callbacks BEFORE discovery
+        # so that initially discovered transcripts create Session entries.
+        sm = self.session_manager
+        for registry in (self.claude_transcript_registry, self.codex_transcript_registry):
+            registry.on_state_update(sm.handle_monitor_state_update)
+            registry.on_transcript_added(sm.handle_transcript_added)
+            registry.on_transcript_removed(sm.handle_transcript_removed)
+
+        # Now discover — register_transcript is awaited directly, so
+        # SessionManager is populated before init() returns.
+        await self._auto_discover_project_directories()
+        logger.info("SessionManager started (%d sessions)", len(sm._sessions))
 
         logger.info("AgentHubProvider initialised successfully.")
 
-    async def _auto_discover_repositories(self) -> None:
-        """Auto-discover repositories from existing session files.
+    async def _auto_discover_project_directories(self) -> None:
+        """Register all existing project directories with the transcript registry.
 
-        Scans ~/.claude/projects/ for encoded project directories and adds
-        any that correspond to real directories on disk.
-
-        Because Claude's path encoding is lossy (``/`` and ``-`` both become
-        ``-``), we cannot reliably *decode* a folder name back to a filesystem
-        path.  Instead we try progressively resolving the encoded name: split
-        on ``-``, then greedily re-join segments with ``-`` where a real
-        directory exists on disk.
+        Scans ~/.claude/projects/ and registers each subdirectory.
+        ``add_project_directory`` is async — it awaits the initial file
+        enumeration so all existing transcripts are discovered and
+        registered (via callbacks) before this method returns.
         """
-        from agent_hub.services.path_utils import (
-            encode_project_path,
-            get_claude_projects_dir,
-        )
         from pathlib import Path
+
+        from agent_hub.services.path_utils import get_claude_projects_dir
 
         projects_dir = get_claude_projects_dir(self._settings.claude_data_path)
         if not projects_dir.is_dir():
             return
 
-        discovered: set[str] = set()
+        registry = self.claude_transcript_registry
+        count = 0
+
         for child in projects_dir.iterdir():
             if not child.is_dir():
                 continue
-            has_sessions = any(child.glob("*.jsonl"))
-            if not has_sessions:
-                continue
-            resolved = _resolve_encoded_path(child.name)
-            if resolved and Path(resolved).is_dir():
-                # Double-check by re-encoding to make sure it matches
-                if encode_project_path(resolved) == child.name:
-                    discovered.add(resolved)
+            await registry.add_project_directory(str(child))
+            count += 1
 
-        if discovered:
-            await self.claude_monitor.add_repositories(sorted(discovered))
-            logger.info(
-                "Auto-discovered %d Claude repositories: %s",
-                len(discovered),
-                [str(p) for p in sorted(discovered)],
-            )
+        if count:
+            logger.info("Registered %d project directories with transcript registry", count)
 
     async def shutdown(self) -> None:
         """Gracefully stop all background work and release resources."""
         logger.info("Shutting down AgentHubProvider...")
 
-        # File watchers
-        if self._claude_watcher is not None:
-            await self._claude_watcher.shutdown()
-            logger.debug("Claude watcher stopped")
-        if self._codex_watcher is not None:
-            await self._codex_watcher.shutdown()
-            logger.debug("Codex watcher stopped")
+        # Transcript registries (before file watcher)
+        if self._claude_transcript_registry is not None:
+            await self._claude_transcript_registry.stop()
+            logger.debug("Claude transcript registry stopped")
+        if self._codex_transcript_registry is not None:
+            await self._codex_transcript_registry.stop()
+            logger.debug("Codex transcript registry stopped")
 
         # Stats watchers
         if self._stats_service is not None:
@@ -403,5 +376,10 @@ class AgentHubProvider:
         if self._metadata_store is not None:
             await self._metadata_store.close()
             logger.debug("MetadataStore closed")
+
+        # FileWatcher singleton (last — all consumers must be stopped first)
+        if self._file_watcher is not None:
+            self._file_watcher.shutdown()
+            logger.debug("FileWatcher stopped")
 
         logger.info("AgentHubProvider shutdown complete.")

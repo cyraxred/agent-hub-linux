@@ -18,7 +18,7 @@ from agent_hub.models.monitor_state import (
     SessionMonitorState,
 )
 from agent_hub.models.process_info import SessionProcessState, UnmatchedClaudeProcess
-from agent_hub.models.session import CLISession, SelectedRepository
+from agent_hub.models.session import CLISession
 
 logger = logging.getLogger(__name__)
 
@@ -143,46 +143,29 @@ def _find_session_across_providers(
     provider,
     session_id: str,
 ) -> tuple[CLISession | None, str, str]:
-    """Search for a session across both Claude and Codex monitors.
+    """Search for a session via SessionManager.
 
     Returns (session, repository_path, provider_name).
     """
-    # Search Claude repositories
-    for repo in provider.claude_monitor.repositories:
-        for wt in repo.worktrees:
-            for sess in wt.sessions:
-                if sess.id == session_id:
-                    return sess, repo.path, "claude"
-
-    # Search Codex repositories
-    for repo in provider.codex_monitor.repositories:
-        for wt in repo.worktrees:
-            for sess in wt.sessions:
-                if sess.id == session_id:
-                    return sess, repo.path, "codex"
-
+    sm = provider.session_manager
+    cli_session, prov_name = sm.find_cli_session(session_id)
+    if cli_session is not None:
+        return cli_session, cli_session.project_path, prov_name
     return None, "", ""
 
 
 def _collect_all_sessions(
     provider,
 ) -> list[CLISession]:
-    """Collect every session from every repository across both providers."""
-    sessions: list[CLISession] = []
-    for repo in provider.claude_monitor.repositories:
-        for wt in repo.worktrees:
-            sessions.extend(wt.sessions)
-    for repo in provider.codex_monitor.repositories:
-        for wt in repo.worktrees:
-            sessions.extend(wt.sessions)
-    return sessions
+    """Collect every session from SessionManager."""
+    return provider.session_manager.get_all_cli_sessions()
 
 
-def _get_watcher_for_provider(provider, provider_name: str):
-    """Return the correct file watcher for the given provider name."""
+def _get_registry_for_provider(provider, provider_name: str):
+    """Return the correct transcript registry for the given provider name."""
     if provider_name == "codex":
-        return provider.codex_watcher
-    return provider.claude_watcher
+        return provider.codex_transcript_registry
+    return provider.claude_transcript_registry
 
 
 def _parse_result_to_monitor_state(pr: object) -> SessionMonitorState:
@@ -435,11 +418,6 @@ async def delete_session(session_id: str, request: Request) -> DeleteSessionResp
     except Exception:
         logger.exception("Failed to delete metadata for session %s", session_id)
 
-    try:
-        await prov.claude_monitor.refresh_sessions()
-    except Exception:
-        logger.exception("Failed to refresh sessions after deleting %s", session_id)
-
     return DeleteSessionResponse(session_id=session_id, deleted=True)
 
 
@@ -451,14 +429,17 @@ async def start_monitoring(
 ) -> MonitorStateResponse:
     """Start monitoring a session's JSONL file for live state updates."""
     prov = _get_provider(request)
-    watcher = _get_watcher_for_provider(prov, body.provider)
+    registry = _get_registry_for_provider(prov, body.provider)
 
     try:
-        await watcher.start_monitoring(
-            session_id=session_id,
-            project_path=body.project_path,
-            session_file_path=body.session_file_path,
-        )
+        transcript = registry.get_transcript(session_id)
+        if transcript is None and body.session_file_path:
+            transcript = await registry.register_transcript(
+                session_id=session_id,
+                project_path=body.project_path,
+                file_path=body.session_file_path,
+            )
+        await prov.session_manager.set_manual_monitoring(session_id, True)
     except Exception as exc:
         logger.exception("Failed to start monitoring session %s", session_id)
         raise HTTPException(
@@ -466,7 +447,7 @@ async def start_monitoring(
             detail=f"Failed to start monitoring: {exc}",
         ) from exc
 
-    state = await watcher.get_state(session_id)
+    state = transcript.state if transcript is not None else None
     return MonitorStateResponse(
         session_id=session_id,
         state=state,
@@ -482,10 +463,9 @@ async def stop_monitoring(
 ) -> MonitorStateResponse:
     """Stop monitoring a session."""
     prov = _get_provider(request)
-    watcher = _get_watcher_for_provider(prov, provider)
 
     try:
-        await watcher.stop_monitoring(session_id)
+        await prov.session_manager.set_manual_monitoring(session_id, False)
     except Exception as exc:
         logger.exception("Failed to stop monitoring session %s", session_id)
         raise HTTPException(
@@ -512,13 +492,13 @@ async def get_monitor_state(
     parse cache (full JSONL parse, cached by file size).
     """
     prov = _get_provider(request)
-    watcher = _get_watcher_for_provider(prov, provider)
-    state = await watcher.get_state(session_id)
-    if state is not None:
+    registry = _get_registry_for_provider(prov, provider)
+    transcript = registry.get_transcript(session_id)
+    if transcript is not None:
         return MonitorStateResponse(
             session_id=session_id,
-            state=state,
-            monitoring=True,
+            state=transcript.state,
+            monitoring=transcript.is_monitored,
         )
 
     # Cache fallback for non-monitored sessions
@@ -543,10 +523,14 @@ async def refresh_session_state(
 ) -> MonitorStateResponse:
     """Force-refresh the monitor state for a session by re-parsing from scratch."""
     prov = _get_provider(request)
-    watcher = _get_watcher_for_provider(prov, provider)
+    registry = _get_registry_for_provider(prov, provider)
+    transcript = registry.get_transcript(session_id)
+
+    if transcript is None:
+        return MonitorStateResponse(session_id=session_id, state=None, monitoring=False)
 
     try:
-        await watcher.refresh_state(session_id)
+        await transcript.refresh()
     except Exception as exc:
         logger.exception("Failed to refresh session state %s", session_id)
         raise HTTPException(
@@ -554,11 +538,10 @@ async def refresh_session_state(
             detail=f"Failed to refresh state: {exc}",
         ) from exc
 
-    state = await watcher.get_state(session_id)
     return MonitorStateResponse(
         session_id=session_id,
-        state=state,
-        monitoring=state is not None,
+        state=transcript.state,
+        monitoring=transcript.is_monitored,
     )
 
 
@@ -644,14 +627,14 @@ async def get_session_plan(
     """
     prov = _get_provider(request)
 
-    # First check if session is monitored and has plan content already
-    for watcher in (prov.claude_watcher, prov.codex_watcher):
-        state = await watcher.get_state(session_id)
-        if state is not None and state.plan_content:
+    # First check if session has a transcript with plan content
+    for registry in (prov.claude_transcript_registry, prov.codex_transcript_registry):
+        transcript = registry.get_transcript(session_id)
+        if transcript is not None and transcript.state.plan_content:
             return PlanResponse(
                 session_id=session_id,
-                plan_file_path=state.plan_file_path,
-                plan_content=state.plan_content,
+                plan_file_path=transcript.state.plan_file_path,
+                plan_content=transcript.state.plan_content,
             )
 
     # Not monitored — use parse cache
@@ -724,12 +707,6 @@ async def create_pending_session(
     with open(session_file, "w") as f:
         f.write(json.dumps(snapshot_entry) + "\n")
         f.write(json.dumps(user_entry) + "\n")
-
-    # Refresh session list so the new file is discovered immediately
-    try:
-        await prov.claude_monitor.refresh_sessions()
-    except Exception:
-        logger.exception("Failed to refresh sessions after creating pending session")
 
     return CreatePendingSessionResponse(
         session_id=session_id,

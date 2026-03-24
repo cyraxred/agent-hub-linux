@@ -108,6 +108,8 @@ class ParseResult:
     git_branch: str = ""
     plans: list[PlanEntry] = field(default_factory=list)
     mermaid_diagrams: list[MermaidDiagram] = field(default_factory=list)
+    slug: str = ""
+    first_user_message: str = ""
 
     @property
     def plan_file_path(self) -> str:
@@ -217,6 +219,14 @@ def parse_new_lines(
             result.session_started_at = ts
         result.last_activity_at = ts
 
+        # Extract slug from top-level entry fields
+        if not result.slug:
+            for key in ("slug", "sessionSlug", "session_slug"):
+                val = entry.get(key)
+                if isinstance(val, str) and val:
+                    result.slug = val
+                    break
+
         message = entry.get("message")
         if not isinstance(message, dict):
             continue
@@ -251,6 +261,8 @@ def parse_new_lines(
         if not isinstance(content, list):
             # Simple role-based tracking
             if role == "user":
+                if not result.first_user_message and isinstance(content, str) and content.strip():
+                    result.first_user_message = content.strip()
                 result.message_count += 1
                 _add_activity(
                     result,
@@ -362,6 +374,12 @@ def parse_new_lines(
                 text_val = str(block.get("text", ""))
                 if role == "user" and text_val.strip():
                     has_user_text = True
+                    if not result.first_user_message:
+                        result.first_user_message = text_val.strip()
+                if not result.slug:
+                    m = re.search(r'"slug"\s*:\s*"([^"]+)"', text_val)
+                    if m:
+                        result.slug = m.group(1)
                 if "```mermaid" in text_val:
                     _extract_mermaid_blocks(result, text_val, "", "", ts)
 

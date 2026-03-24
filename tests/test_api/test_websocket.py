@@ -14,7 +14,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from agent_hub.models.monitor_state import SessionMonitorState
-from agent_hub.models.session import CLISession, SelectedRepository, WorktreeBranch
 
 
 # ---------------------------------------------------------------------------
@@ -26,31 +25,19 @@ def _build_mock_provider() -> MagicMock:
     """Create a mock AgentHubProvider for WebSocket tests."""
     provider = MagicMock()
 
-    # Claude monitor
-    claude_monitor = MagicMock()
-    type(claude_monitor).repositories = PropertyMock(return_value=[])
-    claude_monitor.refresh_sessions = AsyncMock()
-    provider.claude_monitor = claude_monitor
+    # Claude transcript registry
+    claude_registry = MagicMock()
+    claude_registry.get_transcript = MagicMock(return_value=None)
+    claude_registry.register_transcript = AsyncMock()
+    claude_registry.set_monitored = MagicMock()
+    provider.claude_transcript_registry = claude_registry
 
-    # Codex monitor
-    codex_monitor = MagicMock()
-    type(codex_monitor).repositories = PropertyMock(return_value=[])
-    codex_monitor.refresh_sessions = AsyncMock()
-    provider.codex_monitor = codex_monitor
-
-    # Claude watcher
-    claude_watcher = MagicMock()
-    claude_watcher.start_monitoring = AsyncMock()
-    claude_watcher.stop_monitoring = AsyncMock()
-    claude_watcher.get_state = AsyncMock(return_value=SessionMonitorState())
-    provider.claude_watcher = claude_watcher
-
-    # Codex watcher
-    codex_watcher = MagicMock()
-    codex_watcher.start_monitoring = AsyncMock()
-    codex_watcher.stop_monitoring = AsyncMock()
-    codex_watcher.get_state = AsyncMock(return_value=None)
-    provider.codex_watcher = codex_watcher
+    # Codex transcript registry
+    codex_registry = MagicMock()
+    codex_registry.get_transcript = MagicMock(return_value=None)
+    codex_registry.register_transcript = AsyncMock()
+    codex_registry.set_monitored = MagicMock()
+    provider.codex_transcript_registry = codex_registry
 
     # Process registry
     process_registry = MagicMock()
@@ -59,6 +46,8 @@ def _build_mock_provider() -> MagicMock:
     # Session manager
     session_manager = MagicMock()
     session_manager._schedule_notify = MagicMock()
+    session_manager.set_manual_monitoring = AsyncMock()
+    session_manager.get_all_sessions = MagicMock(return_value=[])
     provider.session_manager = session_manager
 
     return provider
@@ -117,7 +106,7 @@ class TestWebSocketConnection:
                 }
                 ws.send_text(json.dumps(msg))
 
-        provider.claude_watcher.start_monitoring.assert_called_once()
+        provider.claude_transcript_registry.register_transcript.assert_called_once()
 
     def test_websocket_unsubscribe_session(self) -> None:
         """Test sending an unsubscribe_session message."""
@@ -168,7 +157,7 @@ class TestWebSocketConnection:
                 assert response["kind"] == "error"
 
     def test_websocket_refresh_sessions(self) -> None:
-        """Test sending a refresh_sessions message."""
+        """Test sending a refresh_sessions message triggers session broadcasts."""
         provider = _build_mock_provider()
         app = _create_ws_test_app(provider)
 
@@ -176,11 +165,8 @@ class TestWebSocketConnection:
             with client.websocket_connect("/ws") as ws:
                 msg = {"kind": "refresh_sessions"}
                 ws.send_text(json.dumps(msg))
-
-                # After refresh, the handler broadcasts sessions_updated
-                response = ws.receive_json()
-                assert response["kind"] == "sessions_updated"
-                assert "repositories" in response
+                # Refresh now triggers _schedule_notify per session (no
+                # sessions in mock → no broadcast), so we just verify no error.
 
     def test_websocket_subscribe_starts_monitoring(self) -> None:
         """Verify that subscribing actually calls start_monitoring on the watcher."""
@@ -197,8 +183,8 @@ class TestWebSocketConnection:
                 }
                 ws.send_text(json.dumps(msg))
 
-        provider.claude_watcher.start_monitoring.assert_called_once_with(
+        provider.claude_transcript_registry.register_transcript.assert_called_once_with(
             session_id="sess-abc",
             project_path="/proj",
-            session_file_path="/home/user/.claude/projects/x/sess-abc.jsonl",
+            file_path="/home/user/.claude/projects/x/sess-abc.jsonl",
         )

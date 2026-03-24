@@ -49,7 +49,7 @@ class GlobalSearchService:
         session_files = find_session_files(projects_dir)
         for sf in session_files:
             session_id = session_id_from_path(sf)
-            project_path = project_path_from_session_dir(sf.parent, projects_dir)
+            project_path = project_path_from_session_dir(sf.parent)
 
             hist_entry = history.get(session_id)
             slug = ""

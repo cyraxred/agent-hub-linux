@@ -41,32 +41,27 @@ class SessionMonitorServiceProtocol(Protocol):
 
 
 @runtime_checkable
-class SessionFileWatcherProtocol(Protocol):
-    """Protocol for watching session JSONL files for changes."""
+class TranscriptRegistryProtocol(Protocol):
+    """Protocol for transcript registry services."""
 
-    async def start_monitoring(
-        self,
-        session_id: str,
-        project_path: str,
-        session_file_path: str | None = None,
-    ) -> None:
-        """Start monitoring a session's JSONL file."""
+    def get_transcript(self, session_id: str) -> object | None:
+        """Return the transcript for a session, or None."""
         ...
 
-    async def stop_monitoring(self, session_id: str) -> None:
-        """Stop monitoring a session."""
+    def get_all_transcripts(self) -> list[object]:
+        """Return all confirmed transcripts."""
         ...
 
-    async def get_state(self, session_id: str) -> SessionMonitorState | None:
-        """Get current monitor state for a session."""
+    def set_monitored(self, session_id: str, monitored: bool) -> None:
+        """Set per-file monitoring for a session."""
         ...
 
-    async def refresh_state(self, session_id: str) -> None:
-        """Force-refresh the monitor state for a session."""
+    async def add_project_directory(self, path: str) -> None:
+        """Start watching a project directory."""
         ...
 
-    async def set_approval_timeout(self, seconds: int) -> None:
-        """Set the approval timeout threshold."""
+    def remove_project_directory(self, path: str) -> None:
+        """Stop watching a project directory."""
         ...
 
 

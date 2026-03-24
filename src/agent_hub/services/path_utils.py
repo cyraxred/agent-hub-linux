@@ -28,13 +28,57 @@ def decode_project_path(encoded: str) -> str:
 
     Reverses the encoding from encode_project_path.
     Example: -home-user-myproject -> /home/user/myproject
+
+    Tries the smart filesystem-walking resolver first (handles dashes in
+    directory names like ``agent-hub-linux``).  Falls back to a naive
+    dash-to-slash replacement if the path cannot be resolved on disk.
+    """
+    resolved = resolve_encoded_path(encoded)
+    if resolved is not None:
+        return resolved
+    # Fallback: naive decode
+    if not encoded or encoded == "-":
+        return "/"
+    stripped = encoded.lstrip("-")
+    return "/" + stripped.replace("-", "/")
+
+
+def resolve_encoded_path(encoded: str) -> str | None:
+    """Resolve a Claude-encoded project folder name back to a real filesystem path.
+
+    Claude encodes paths by stripping the leading ``/`` and replacing every
+    ``/`` with ``-``.  This is ambiguous when directory names contain dashes.
+
+    Greedily walks the encoded segments: at each step tries extending the
+    current component with a ``-`` (literal dash) before trying a ``/``
+    (separator).  Prefers longer directory names, which resolves the
+    ambiguity for names like ``agent-hub-linux``.
+
+    Returns None if the path cannot be resolved to an existing directory.
     """
     if not encoded or encoded == "-":
         return "/"
-    # Remove leading dash, replace remaining dashes with /
-    # This is a best-effort heuristic—ambiguity exists when directory names contain dashes
+
     stripped = encoded.lstrip("-")
-    return "/" + stripped.replace("-", "/")
+    parts = stripped.split("-")
+    if not parts:
+        return None
+
+    def _walk(idx: int, current: str) -> str | None:
+        if idx == len(parts):
+            return current if Path(current).is_dir() else None
+
+        for end in range(len(parts), idx, -1):
+            candidate_segment = "-".join(parts[idx:end])
+            candidate_path = current + "/" + candidate_segment
+            if Path(candidate_path).is_dir():
+                result = _walk(end, candidate_path)
+                if result is not None:
+                    return result
+
+        return None
+
+    return _walk(0, "")
 
 
 def get_claude_projects_dir(claude_data_path: str) -> Path:
@@ -201,15 +245,11 @@ def session_id_from_path(session_file: Path) -> str:
     return session_file.stem
 
 
-def project_path_from_session_dir(session_dir: Path, projects_dir: Path) -> str:
-    """Extract the project path from a session directory relative to projects dir.
+def project_path_from_session_dir(session_dir: Path) -> str:
+    """Extract the project path from a session directory.
 
     The session_dir is like ~/.claude/projects/{encoded_path}/
-    We want to decode {encoded_path} back to the original project path.
+    The encoded directory name is the last component.
     """
-    try:
-        rel = session_dir.relative_to(projects_dir)
-        encoded = str(rel.parts[0]) if rel.parts else ""
-        return decode_project_path(encoded)
-    except ValueError:
-        return str(session_dir)
+    encoded = session_dir.name
+    return decode_project_path(encoded)

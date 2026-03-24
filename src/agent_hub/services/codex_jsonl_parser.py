@@ -87,6 +87,8 @@ class ParseResult:
     current_status: SessionMonitorState | None = None
     plans: list[PlanEntry] = field(default_factory=list)
     mermaid_diagrams: list[MermaidDiagram] = field(default_factory=list)
+    slug: str = ""
+    first_user_message: str = ""
 
     @property
     def plan_file_path(self) -> str:
@@ -179,6 +181,8 @@ def parse_new_lines(
         content = message.get("content")
         if not isinstance(content, list):
             if role == "user":
+                if not result.first_user_message and isinstance(content, str) and content.strip():
+                    result.first_user_message = content.strip()
                 result.message_count += 1
                 _add_activity(
                     result,
@@ -249,6 +253,11 @@ def parse_new_lines(
                         description="Thinking...",
                     ),
                 )
+
+            elif block_type == "text" and role == "user":
+                text_val = str(block.get("text", ""))
+                if not result.first_user_message and text_val.strip():
+                    result.first_user_message = text_val.strip()
 
         if role == "user":
             result.message_count += 1

@@ -14,13 +14,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable
 
+from pathlib import Path
+
 from agent_hub.config.defaults import STOP_IDLE_PROCESS_MS, STOP_NOANSWER_PROCESS_MS
 from agent_hub.models.monitor_state import SessionMonitorState
 from agent_hub.models.process_info import ClaudeProcessCategory, ClaudeProcessInfo
+from agent_hub.models.session import CLISession
 
 if TYPE_CHECKING:
     from agent_hub.services.claude_process_tracker import ClaudeProcessTracker
     from agent_hub.services.process_registry import ProcessRegistry
+    from agent_hub.services.transcript_registry import TranscriptRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,13 @@ class Session:
     branch_name: str = ""
     monitor_state: SessionMonitorState | None = None
     process: ClaudeProcessInfo | None = None
+
+    # -- Monitoring flags --
+    # manual_monitoring: set by WS subscribe, cleared by WS unsubscribe
+    manual_monitoring: bool = False
+    # auto_monitoring: set when terminal-connected OR
+    #   (has pending attention AND process is alive)
+    auto_monitoring: bool = False
 
     # -- Computed properties --
     #
@@ -99,6 +110,14 @@ class Session:
         )
 
     @property
+    def should_monitor(self) -> bool:
+        """Whether transcript monitoring should be active.
+
+        True when *either* manual or auto monitoring is on.
+        """
+        return self.manual_monitoring or self.auto_monitoring
+
+    @property
     def is_monitored(self) -> bool:
         """A file watcher is actively parsing this session's JSONL.
 
@@ -130,6 +149,10 @@ class SessionManager:
         self._pending_broadcasts: dict[str, asyncio.Task] = {}
         self._cleanup_task: asyncio.Task | None = None
         self._process_registry: ProcessRegistry | None = None
+        self._repositories: set[str] = set()
+        self._claude_registry: TranscriptRegistry | None = None
+        self._codex_registry: TranscriptRegistry | None = None
+        self._claude_data_path: str = "~/.claude"
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -220,6 +243,9 @@ class SessionManager:
                     changed_ids.add(sid)
 
             for sid in changed_ids:
+                session = self._sessions.get(sid)
+                if session is not None:
+                    self._recompute_auto_monitoring(session)
                 self._schedule_notify(sid)
 
     async def handle_attention_changed(self, session_id: str) -> None:
@@ -227,11 +253,13 @@ class SessionManager:
 
         We don't store any attention data — just trigger a broadcast so
         the WS handler can query the tracker for the current state.
+        Also recomputes auto_monitoring (attention may require watching).
         """
         async with self._lock:
             session = self._sessions.get(session_id)
             if session is not None:
                 session.last_activity_at = datetime.now(tz=timezone.utc)
+                self._recompute_auto_monitoring(session)
             self._schedule_notify(session_id)
 
     async def handle_monitor_state_update(
@@ -246,7 +274,30 @@ class SessionManager:
             session.monitor_state = state
             if state.last_activity_at:
                 session.last_activity_at = state.last_activity_at
+
+            # Refresh metadata from transcript (slug/first_message may
+            # not have been available during the initial parse)
+            self._refresh_session_metadata(session)
+
             self._schedule_notify(session_id)
+
+    def _refresh_session_metadata(self, session: Session) -> None:
+        """Pull slug, first_message, branch_name from the transcript if available."""
+        registry = self._registry_for_session(session)
+        if registry is None:
+            return
+        transcript = registry.get_transcript(session.session_id)
+        if transcript is None:
+            return
+        slug = getattr(transcript, "slug", "")
+        if slug and not session.slug:
+            session.slug = slug
+        first_msg = getattr(transcript, "first_message", "")
+        if first_msg and not session.first_message:
+            session.first_message = first_msg
+        branch = getattr(transcript.parse_result, "git_branch", "")
+        if branch and not session.branch_name:
+            session.branch_name = branch
 
     async def handle_monitor_stopped(self, session_id: str) -> None:
         """Called when file watcher stops monitoring a session."""
@@ -264,6 +315,7 @@ class SessionManager:
             if session is None:
                 session = Session(session_id=session_id)
                 self._sessions[session_id] = session
+            self._recompute_auto_monitoring(session)
             self._schedule_notify(session_id)
 
     async def handle_terminal_unregistered(self, session_id: str) -> None:
@@ -272,40 +324,147 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session is None:
                 return
+            self._recompute_auto_monitoring(session)
             self._schedule_notify(session_id)
 
-    async def sync_discovered_sessions(
-        self,
-        discovered: list[object],
-        provider: str,
+    async def handle_transcript_added(
+        self, session_id: str, transcript: object
     ) -> None:
-        """Called after CLISessionMonitorService / CodexSessionMonitorService refresh.
+        """Called by TranscriptRegistry when a new transcript is confirmed.
 
-        ``discovered`` is a list of CLISession objects from the monitor.
-        We merge discovery data (project_path, slug, etc.) into our state
-        without overwriting live process/monitor data.
+        Creates a Session if one doesn't exist, populates file_path,
+        project_path, and metadata (slug, first_message, branch_name)
+        from the transcript.
         """
         async with self._lock:
-            for d in discovered:
-                sid = d.id  # type: ignore[attr-defined]
-                session = self._sessions.get(sid)
-                if session is None:
-                    session = Session(session_id=sid)
-                    self._sessions[sid] = session
+            session = self._sessions.get(session_id)
+            if session is None:
+                session = Session(session_id=session_id)
+                self._sessions[session_id] = session
+            session.session_file_path = getattr(transcript, "file_path", session.session_file_path)
+            project_path = getattr(transcript, "project_path", session.project_path)
+            session.project_path = project_path
+            session.provider = getattr(transcript, "provider", session.provider)
 
-                # Merge discovery fields (don't overwrite process/monitor)
-                session.project_path = getattr(d, "project_path", session.project_path)
-                session.session_file_path = getattr(d, "session_file_path", session.session_file_path)
-                session.provider = provider
-                session.slug = getattr(d, "slug", session.slug) or session.slug
-                session.first_message = getattr(d, "first_message", session.first_message) or session.first_message
-                session.branch_name = getattr(d, "branch_name", session.branch_name) or session.branch_name
-                last = getattr(d, "last_activity_at", None)
-                if last is not None:
-                    session.last_activity_at = last
+            # Auto-track the repository
+            if project_path:
+                self._repositories.add(project_path)
 
-            # We don't remove sessions not in discovered — they may still
-            # have live processes or monitoring state.
+            # Populate metadata from transcript parse result
+            slug = getattr(transcript, "slug", "")
+            if slug:
+                session.slug = slug
+            first_msg = getattr(transcript, "first_message", "")
+            if first_msg:
+                session.first_message = first_msg
+            branch = ""
+            pr = getattr(transcript, "parse_result", None)
+            if pr is not None:
+                branch = getattr(pr, "git_branch", "")
+            if branch:
+                session.branch_name = branch
+
+            self._schedule_notify(session_id)
+
+    async def handle_transcript_removed(self, session_id: str) -> None:
+        """Called by TranscriptRegistry when a transcript file is deleted."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            # Only remove if no live process
+            if session.process is None:
+                self._sessions.pop(session_id, None)
+            else:
+                session.monitor_state = None
+                session.manual_monitoring = False
+                session.auto_monitoring = False
+            self._schedule_notify(session_id)
+
+    # ------------------------------------------------------------------
+    # Repository management
+    # ------------------------------------------------------------------
+
+    def get_repositories(self) -> list[str]:
+        """Return all watched repository paths."""
+        return sorted(self._repositories)
+
+    async def add_repository(self, path: str, provider: str = "claude") -> bool:
+        """Add a repository path and register its project directory with the registry.
+
+        Returns True if newly added, False if already tracked.
+        """
+        resolved = str(Path(path).resolve())
+        if resolved in self._repositories:
+            return False
+        self._repositories.add(resolved)
+
+        # Register the corresponding Claude/Codex project directory
+        registry = self._claude_registry if provider == "claude" else self._codex_registry
+        if registry is not None:
+            if provider == "claude":
+                from agent_hub.services.path_utils import encode_project_path, get_claude_projects_dir
+                projects_dir = get_claude_projects_dir(self._claude_data_path)
+                encoded = encode_project_path(resolved)
+                project_dir = projects_dir / encoded
+                if project_dir.is_dir():
+                    await registry.add_project_directory(str(project_dir))
+        return True
+
+    async def remove_repository(self, path: str, provider: str = "claude") -> None:
+        """Remove a repository path and unregister its project directory."""
+        resolved = str(Path(path).resolve())
+        self._repositories.discard(resolved)
+
+        registry = self._claude_registry if provider == "claude" else self._codex_registry
+        if registry is not None and provider == "claude":
+            from agent_hub.services.path_utils import encode_project_path, get_claude_projects_dir
+            projects_dir = get_claude_projects_dir(self._claude_data_path)
+            encoded = encode_project_path(resolved)
+            project_dir = projects_dir / encoded
+            registry.remove_project_directory(str(project_dir))
+
+    # ------------------------------------------------------------------
+    # Session listing (replaces CLISessionMonitorService)
+    # ------------------------------------------------------------------
+
+    def get_all_cli_sessions(self) -> list[CLISession]:
+        """Build a CLISession list from all known sessions.
+
+        This replaces the monitor's ``_collect_all_sessions`` helper and
+        the ``SelectedRepository → WorktreeBranch → CLISession`` tree.
+        """
+        now = datetime.now(tz=timezone.utc)
+        sessions: list[CLISession] = []
+        for s in self._sessions.values():
+            sessions.append(CLISession(
+                id=s.session_id,
+                project_path=s.project_path,
+                branch_name=s.branch_name,
+                last_activity_at=s.last_activity_at or now,
+                first_message=s.first_message,
+                slug=s.slug,
+                session_file_path=s.session_file_path,
+            ))
+        sessions.sort(key=lambda s: s.last_activity_at, reverse=True)
+        return sessions
+
+    def find_cli_session(self, session_id: str) -> tuple[CLISession | None, str]:
+        """Find a single CLISession by ID. Returns (session, provider)."""
+        now = datetime.now(tz=timezone.utc)
+        s = self._sessions.get(session_id)
+        if s is None:
+            return None, ""
+        cli = CLISession(
+            id=s.session_id,
+            project_path=s.project_path,
+            branch_name=s.branch_name,
+            last_activity_at=s.last_activity_at or now,
+            first_message=s.first_message,
+            slug=s.slug,
+            session_file_path=s.session_file_path,
+        )
+        return cli, s.provider
 
     # ------------------------------------------------------------------
     # Tracker reference (set during wiring)
@@ -319,6 +478,71 @@ class SessionManager:
     def set_process_registry(self, registry: ProcessRegistry) -> None:
         self._process_registry = registry
         registry.set_activity_callback(self.handle_terminal_activity)
+
+    def set_transcript_registry(
+        self,
+        claude_registry: TranscriptRegistry | None = None,
+        codex_registry: TranscriptRegistry | None = None,
+        claude_data_path: str = "~/.claude",
+    ) -> None:
+        """Inject transcript registries.  Called during wiring."""
+        if claude_registry is not None:
+            self._claude_registry = claude_registry
+        if codex_registry is not None:
+            self._codex_registry = codex_registry
+        self._claude_data_path = claude_data_path
+
+    def _registry_for_session(self, session: Session) -> TranscriptRegistry | None:
+        if session.provider == "codex":
+            return self._codex_registry
+        return self._claude_registry
+
+    # ------------------------------------------------------------------
+    # Monitoring state management
+    # ------------------------------------------------------------------
+
+    def _update_monitoring(self, session: Session) -> None:
+        """Reconcile monitoring state with the transcript registry.
+
+        Called after any change to manual_monitoring, auto_monitoring,
+        or process state.
+        """
+        registry = self._registry_for_session(session)
+        if registry is None:
+            return
+        registry.set_monitored(session.session_id, session.should_monitor)
+
+    def _recompute_auto_monitoring(self, session: Session) -> None:
+        """Recompute auto_monitoring based on current state.
+
+        auto_monitoring is True when:
+        - terminal is connected, OR
+        - session has pending attention AND process is alive
+        """
+        terminal_connected = (
+            session.process is not None
+            and session.process.terminal_connected
+        )
+        has_attention = (
+            self._tracker is not None
+            and session.is_running
+            and len(self._tracker.get_pending_attention_for_session(session.session_id)) > 0
+        )
+        old = session.auto_monitoring
+        session.auto_monitoring = terminal_connected or has_attention
+        if session.auto_monitoring != old:
+            self._update_monitoring(session)
+
+    async def set_manual_monitoring(self, session_id: str, enabled: bool) -> None:
+        """Called by WS subscribe/unsubscribe to toggle manual monitoring."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            if session.manual_monitoring == enabled:
+                return
+            session.manual_monitoring = enabled
+            self._update_monitoring(session)
 
     # ------------------------------------------------------------------
     # Terminal I/O activity

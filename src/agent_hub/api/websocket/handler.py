@@ -16,7 +16,6 @@ from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from agent_hub.models.search import SessionSearchResult
-from agent_hub.models.session import SelectedRepository
 from agent_hub.models.stats import GlobalStatsCache
 from agent_hub.models.ws_messages import (
     AttentionNotification,
@@ -30,7 +29,6 @@ from agent_hub.models.ws_messages import (
     ServerMessageError,
     ServerMessageSearchResults,
     ServerMessageSessionHistoryAppend,
-    ServerMessageSessionsUpdated,
     ServerMessageSessionUpdate,
     ServerMessageStatsUpdated,
     ServerMessageTerminalOutput,
@@ -63,7 +61,24 @@ class ConnectionManager:
         async with self._lock:
             if ws in self._connections:
                 self._connections.remove(ws)
-            self._subscriptions.pop(id(ws), None)
+            subscribed_sessions = self._subscriptions.pop(id(ws), set())
+
+        # Clear manual monitoring for sessions this connection was subscribed to
+        if subscribed_sessions:
+            try:
+                sm = ws.app.state.provider.session_manager
+                for session_id in subscribed_sessions:
+                    # Only clear if no other connections are subscribed
+                    async with self._lock:
+                        still_subscribed = any(
+                            session_id in self._subscriptions.get(id(other_ws), set())
+                            for other_ws in self._connections
+                        )
+                    if not still_subscribed:
+                        await sm.set_manual_monitoring(session_id, False)
+            except Exception:
+                logger.debug("Could not clear manual monitoring on disconnect", exc_info=True)
+
         logger.info("WebSocket disconnected: %s", id(ws))
 
     @property
@@ -127,12 +142,6 @@ class ConnectionManager:
     # ------------------------------------------------------------------
     # High-level broadcast helpers
     # ------------------------------------------------------------------
-
-    async def broadcast_sessions_updated(
-        self, repositories: list[SelectedRepository]
-    ) -> None:
-        msg = ServerMessageSessionsUpdated(repositories=repositories)
-        await self.broadcast(msg.model_dump(mode="json"))
 
     async def broadcast_stats_updated(
         self, provider: str, stats: GlobalStatsCache
@@ -208,14 +217,10 @@ async def _on_codex_stats_update(stats: GlobalStatsCache | None) -> None:
         await manager.broadcast_stats_updated("codex", stats)
 
 
-
-
 def _build_session_update_msg(
     sm: Any, session_id: str,
 ) -> ServerMessageSessionUpdate | None:
     """Build a ``session_update`` message for a session, or None if unknown."""
-    from agent_hub.services.session_manager import Session  # noqa: F811
-
     session = sm.get_session(session_id)
     if session is None:
         return None
@@ -266,22 +271,22 @@ def register_provider_callbacks(provider: Any) -> None:
 
     Call this once during FastAPI app startup.
     """
-    # Session file watchers — history append only (session_state_update
-    # is handled via SessionManager's unified path)
-    provider.claude_watcher.on_history_append(_on_session_history_append)
-    provider.codex_watcher.on_history_append(_on_session_history_append)
-
-    # Wire transcript-based attention resolution: when a tool_result arrives
-    # for a tool_use_id that has a pending attention entry, resolve it.
-    # The tracker fires its own resolved callbacks which trigger the broadcast.
     async def _on_tool_result(session_id: str, tool_use_id: str) -> None:
         try:
             provider.process_tracker.resolve_attention(session_id, tool_use_id)
         except Exception:
             logger.exception("Error resolving attention from tool_result")
 
-    provider.claude_watcher.on_tool_result(_on_tool_result)
-    provider.codex_watcher.on_tool_result(_on_tool_result)
+    # --- Transcript registry → WS broadcast wiring ---
+    # Core callbacks (state_update, transcript_added/removed) are wired
+    # in provider.init() so they fire during initial discovery.
+    # Here we add WS-specific callbacks: history append and tool_result.
+    try:
+        for registry in (provider.claude_transcript_registry, provider.codex_transcript_registry):
+            registry.on_history_append(_on_session_history_append)
+            registry.on_tool_result(_on_tool_result)
+    except Exception:
+        logger.exception("Failed to wire transcript registry callbacks")
 
     # --- SessionManager wiring ---
     try:
@@ -300,22 +305,6 @@ def register_provider_callbacks(provider: Any) -> None:
 
         provider.process_tracker.on_attention(_on_attention)
         provider.process_tracker.on_attention_resolved(_on_attention_resolved)
-
-        # File watchers -> SessionManager (unified path only)
-        provider.claude_watcher.on_state_update(sm.handle_monitor_state_update)
-        provider.codex_watcher.on_state_update(sm.handle_monitor_state_update)
-
-        # Session discovery -> SessionManager
-        provider.claude_monitor.on_refresh(
-            lambda sessions: asyncio.ensure_future(
-                sm.sync_discovered_sessions(sessions, "claude")
-            )
-        )
-        provider.codex_monitor.on_refresh(
-            lambda sessions: asyncio.ensure_future(
-                sm.sync_discovered_sessions(sessions, "codex")
-            )
-        )
 
         # Unified broadcast
         _on_unified_session_update._provider = provider  # type: ignore[attr-defined]
@@ -415,28 +404,34 @@ async def _handle_subscribe(
     """Subscribe to a session and start monitoring its file."""
     await manager.subscribe(ws, msg.session_id)
 
-    watcher = provider.claude_watcher
+    # If the transcript isn't already tracked by the registry, register it.
+    registry = provider.claude_transcript_registry
     if msg.session_file_path and ".codex" in msg.session_file_path:
-        watcher = provider.codex_watcher
+        registry = provider.codex_transcript_registry
 
+    transcript = registry.get_transcript(msg.session_id)
+    if transcript is None and msg.session_file_path:
+        try:
+            await registry.register_transcript(
+                session_id=msg.session_id,
+                project_path=msg.project_path,
+                file_path=msg.session_file_path,
+            )
+        except Exception:
+            logger.exception("Failed to register transcript for %s", msg.session_id)
+            await manager.send_error(ws, f"Failed to start monitoring {msg.session_id}")
+            return
+
+    # Set manual monitoring — tells the registry to watch per-file for
+    # instant notification.
     try:
-        await watcher.start_monitoring(
-            session_id=msg.session_id,
-            project_path=msg.project_path,
-            session_file_path=msg.session_file_path or None,
-        )
+        await provider.session_manager.set_manual_monitoring(msg.session_id, True)
     except Exception:
-        logger.exception("Failed to start monitoring %s", msg.session_id)
-        await manager.send_error(ws, f"Failed to start monitoring {msg.session_id}")
-        return
+        logger.debug("Could not set manual monitoring for %s", msg.session_id)
 
     # Trigger an immediate unified broadcast so the subscriber gets current state.
-    # The watcher's start_monitoring also fires on_state_update which flows through
-    # SessionManager, but this ensures the subscriber gets state even if the watcher
-    # had already parsed this session.
     try:
-        sm = provider.session_manager
-        sm._schedule_notify(msg.session_id)
+        provider.session_manager._schedule_notify(msg.session_id)
     except Exception:
         logger.debug("Could not trigger immediate session update for %s", msg.session_id)
 
@@ -447,6 +442,13 @@ async def _handle_unsubscribe(
     provider: Any,
 ) -> None:
     await manager.unsubscribe(ws, msg.session_id)
+
+    # Clear manual monitoring — auto_monitoring may keep the transcript
+    # watched if there's pending attention.
+    try:
+        await provider.session_manager.set_manual_monitoring(msg.session_id, False)
+    except Exception:
+        logger.debug("Could not clear manual monitoring for %s", msg.session_id)
 
 
 async def _handle_terminal_input(
@@ -494,21 +496,8 @@ async def _handle_terminal_resize(
 
 
 async def _handle_refresh_sessions(provider: Any) -> None:
-    try:
-        await provider.claude_monitor.refresh_sessions()
-        await provider.codex_monitor.refresh_sessions()
-    except Exception:
-        logger.exception("Failed to refresh sessions")
-        return
-
-    repositories: list[SelectedRepository] = []
-    repositories.extend(provider.claude_monitor.repositories)
-    repositories.extend(provider.codex_monitor.repositories)
-    await manager.broadcast_sessions_updated(repositories)
-
     # Broadcast current session state for all known sessions so the frontend
-    # gets process/attention state immediately, rather than waiting for the
-    # next periodic tracker refresh (~10s).
+    # gets process/attention state immediately.
     try:
         sm = provider.session_manager
         for session in sm.get_all_sessions():

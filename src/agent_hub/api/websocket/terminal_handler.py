@@ -134,8 +134,12 @@ async def _write_pty(
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass  # Not a JSON message -- treat as terminal input
 
-        # Write raw input to the PTY and notify activity
-        registry.notify_input_activity(key)
+        # Only count printable text and common control keys (Enter,
+        # Backspace, Ctrl+C, etc.) as intentional user input.
+        # Everything starting with ESC is either a terminal protocol
+        # auto-response or navigation — not meaningful input.
+        if not raw.startswith("\x1b"):
+            registry.notify_input_activity(key)
         try:
             os.write(fd, raw.encode("utf-8"))
         except OSError:
@@ -194,7 +198,26 @@ async def terminal_websocket_endpoint(ws: WebSocket, key: str) -> None:
 
     finally:
         registry.unsubscribe(key)
-        logger.info("Terminal WebSocket disconnected: key=%s", key)
+
+        # If the user never typed anything, kill the process immediately.
+        # There's no work to preserve and no reason to keep it alive.
+        logger.info("Terminal disconnect: key=%s had_user_input=%s", key, proc.had_user_input if proc else "N/A")
+        if proc is not None and not proc.had_user_input:
+            logger.info(
+                "Terminal WebSocket disconnected with no user input — "
+                "terminating process: key=%s pid=%d",
+                key, proc.pid,
+            )
+            try:
+                registry.terminate(key)
+                sm = ws.app.state.provider.session_manager
+                if proc.session_id:
+                    await sm.handle_terminal_unregistered(proc.session_id)
+            except Exception:
+                logger.debug("Failed to terminate unused terminal %s", key, exc_info=True)
+        else:
+            logger.info("Terminal WebSocket disconnected: key=%s", key)
+
         try:
             await ws.close()
         except Exception:

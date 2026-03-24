@@ -1,14 +1,22 @@
-"""Repository routes for adding, removing, and refreshing monitored repositories."""
+"""Repository routes for adding, removing, and refreshing monitored repositories.
+
+NOTE: Worktree detection was previously handled by CLISessionMonitorService.
+It ran ``git worktree list`` and grouped sessions by branch — purely a UI
+grouping concern.  This has been removed.  If needed in the future, add a
+``/api/repositories/{path}/worktrees`` endpoint that calls ``git worktree list``
+and returns the result, letting the frontend handle grouping.
+"""
 
 from __future__ import annotations
 
 import logging
+from pathlib import PurePosixPath
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from agent_hub.models.session import SelectedRepository
+from agent_hub.models.session import CLISession, SelectedRepository, WorktreeBranch
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +29,7 @@ router = APIRouter(prefix="/api/repositories", tags=["repositories"])
 
 
 class RepositoryListResponse(BaseModel):
-    """Response with the full list of repositories."""
+    """Response with the list of watched repositories and their sessions."""
 
     repositories: list[SelectedRepository]
     total: int
@@ -64,11 +72,39 @@ def _get_provider(request: Request):
     return request.app.state.provider
 
 
-def _get_monitor(provider, provider_name: str):
-    """Return the correct session monitor for the given provider name."""
-    if provider_name == "codex":
-        return provider.codex_monitor
-    return provider.claude_monitor
+def _build_repositories(provider) -> list[SelectedRepository]:
+    """Build SelectedRepository objects with sessions grouped inside."""
+    sm = provider.session_manager
+    repos_paths = sm.get_repositories()
+    all_sessions = sm.get_all_cli_sessions()
+
+    # Group sessions by project_path
+    sessions_by_repo: dict[str, list[CLISession]] = {rp: [] for rp in repos_paths}
+    for s in all_sessions:
+        if s.project_path in sessions_by_repo:
+            sessions_by_repo[s.project_path].append(s)
+
+    result: list[SelectedRepository] = []
+    for repo_path in sorted(repos_paths):
+        sessions = sessions_by_repo.get(repo_path, [])
+        # Sort sessions by most recent first
+        sessions.sort(key=lambda s: s.last_activity_at, reverse=True)
+
+        # Single default worktree containing all sessions
+        wt = WorktreeBranch(
+            name=PurePosixPath(repo_path).name,
+            path=repo_path,
+            is_worktree=False,
+            sessions=sessions,
+        )
+
+        result.append(SelectedRepository(
+            path=repo_path,
+            name=PurePosixPath(repo_path).name,
+            worktrees=[wt],
+        ))
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -81,10 +117,9 @@ async def list_repositories(
     request: Request,
     provider: Literal["claude", "codex"] = "claude",
 ) -> RepositoryListResponse:
-    """List all monitored repositories for the given provider."""
+    """List all watched repositories with their sessions."""
     prov = _get_provider(request)
-    monitor = _get_monitor(prov, provider)
-    repos = monitor.repositories
+    repos = _build_repositories(prov)
     return RepositoryListResponse(repositories=repos, total=len(repos))
 
 
@@ -93,12 +128,11 @@ async def add_repository(
     body: AddRepositoryRequest,
     request: Request,
 ) -> AddRepositoryResponse:
-    """Add a repository to the monitor for the given provider."""
+    """Add a repository to watch for the given provider."""
     prov = _get_provider(request)
-    monitor = _get_monitor(prov, body.provider)
 
     try:
-        repo = await monitor.add_repository(body.path)
+        added = await prov.session_manager.add_repository(body.path, body.provider)
     except Exception as exc:
         logger.exception("Failed to add repository %s", body.path)
         raise HTTPException(
@@ -106,10 +140,20 @@ async def add_repository(
             detail=f"Failed to add repository: {exc}",
         ) from exc
 
-    if repo is None:
+    if not added:
         return AddRepositoryResponse(repository=None, already_exists=True)
 
-    return AddRepositoryResponse(repository=repo, already_exists=False)
+    from pathlib import Path
+    resolved = str(Path(body.path).resolve())
+
+    # Build the repository object for the response
+    repos = _build_repositories(prov)
+    repo = next((r for r in repos if r.path == resolved), None)
+
+    return AddRepositoryResponse(
+        repository=repo,
+        already_exists=False,
+    )
 
 
 @router.delete("/{path:path}", response_model=RemoveRepositoryResponse)
@@ -129,10 +173,9 @@ async def remove_repository(
     resolved_path = path if path.startswith("/") else f"/{path}"
 
     prov = _get_provider(request)
-    monitor = _get_monitor(prov, provider)
 
     try:
-        await monitor.remove_repository(resolved_path)
+        await prov.session_manager.remove_repository(resolved_path, provider)
     except Exception as exc:
         logger.exception("Failed to remove repository %s", resolved_path)
         raise HTTPException(
@@ -148,23 +191,5 @@ async def refresh_all_sessions(
     request: Request,
     provider: Literal["claude", "codex"] | None = None,
 ) -> RefreshResponse:
-    """Refresh sessions across all repositories.
-
-    If ``provider`` is specified, only that provider is refreshed.
-    Otherwise both providers are refreshed.
-    """
-    prov = _get_provider(request)
-
-    try:
-        if provider is None or provider == "claude":
-            await prov.claude_monitor.refresh_sessions()
-        if provider is None or provider == "codex":
-            await prov.codex_monitor.refresh_sessions()
-    except Exception as exc:
-        logger.exception("Failed to refresh sessions")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to refresh sessions: {exc}",
-        ) from exc
-
+    """Refresh response (no-op — sessions are discovered automatically by TranscriptRegistry)."""
     return RefreshResponse(success=True, message="Sessions refreshed")

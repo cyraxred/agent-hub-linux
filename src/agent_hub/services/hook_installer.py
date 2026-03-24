@@ -53,7 +53,7 @@ echo "$INPUT" \
 """
 
 # Attention hook — fires on PermissionRequest and PreToolUse (AskUserQuestion).
-# Appends an attention event with session_id, tool info, and PID.
+# Appends an attention event with session_id and tool info (tool_input stripped).
 ATTENTION_HOOK_SCRIPT = r"""#!/usr/bin/env bash
 # Auto-installed by Agent Hub — tracks attention-requiring events.
 set -euo pipefail
@@ -64,20 +64,8 @@ OUTFILE="${OUTDIR}/sessions.jsonl"
 
 INPUT="$(cat)"
 
-# Walk up process tree to find the claude process PID.
-SEARCH=$$
-CLAUDE_PID=""
-while [ "$SEARCH" -gt 1 ]; do
-  COMM=$(cat /proc/$SEARCH/comm 2>/dev/null || true)
-  if [ "$COMM" = "claude" ]; then
-    CLAUDE_PID=$SEARCH
-    break
-  fi
-  SEARCH=$(awk '/PPid/{print $2}' /proc/$SEARCH/status 2>/dev/null || echo 1)
-done
-
 echo "$INPUT" \
-  | jq -c '. + {"event": "attention", "pid": '"${CLAUDE_PID:-0}"', "ts": now}' \
+  | jq -c 'del(.tool_input) + {"event": "attention", "ts": now}' \
   >> "$OUTFILE" 2>/dev/null || true
 """
 

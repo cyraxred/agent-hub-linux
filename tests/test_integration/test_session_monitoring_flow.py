@@ -1,7 +1,7 @@
 """Integration test: session monitoring end-to-end flow.
 
 Creates a temporary directory structure mimicking ~/.claude/,
-discovers sessions, starts a file watcher, appends JSONL lines,
+starts a transcript registry, appends JSONL lines,
 and verifies that state updates propagate correctly.
 """
 
@@ -15,9 +15,10 @@ from pathlib import Path
 import pytest
 
 from agent_hub.models.monitor_state import SessionMonitorState
-from agent_hub.services.cli_session_monitor import CLISessionMonitorService
 from agent_hub.services.path_utils import encode_project_path
-from agent_hub.services.session_file_watcher import SessionFileWatcher
+from agent_hub.services.session_jsonl_parser import ParseResult, parse_new_lines
+from agent_hub.services.transcript_registry import TranscriptRegistry
+from agent_hub.services.file_watcher import FileWatcher
 
 
 def _jsonl_user_message(text: str, ts: str = "2025-06-15T10:30:00Z") -> str:
@@ -111,6 +112,20 @@ def _jsonl_tool_result(
     )
 
 
+def _make_registry(tmp_path: Path) -> tuple[TranscriptRegistry, FileWatcher]:
+    """Create a TranscriptRegistry with its own FileWatcher."""
+    fw = FileWatcher()
+    fw.set_loop(asyncio.get_event_loop())
+    registry = TranscriptRegistry(
+        provider="claude",
+        parse_fn=parse_new_lines,
+        parse_result_factory=ParseResult,
+        approval_timeout_seconds=5,
+        file_watcher=fw,
+    )
+    return registry, fw
+
+
 class TestSessionMonitoringFlow:
     """Integration test for the full session monitoring pipeline."""
 
@@ -140,41 +155,10 @@ class TestSessionMonitoringFlow:
         session_file.write_text("")
         return session_file
 
-    async def test_discover_sessions_in_repository(
-        self, claude_dir: Path, repo_dir: Path
+    async def test_registry_reads_initial_content(
+        self, claude_dir: Path, repo_dir: Path, tmp_path: Path
     ) -> None:
-        """Add a repository and verify sessions are discovered."""
-        repo_path = str(repo_dir)
-        session_id = "integration-test-session"
-
-        # Create session file with initial content
-        session_file = self._setup_session_file(claude_dir, repo_path, session_id)
-        session_file.write_text(
-            _jsonl_user_message("Hello world") + "\n"
-            + _jsonl_assistant_message("Hi there!") + "\n"
-        )
-
-        # Initialize the monitor service
-        monitor = CLISessionMonitorService(claude_data_path=str(claude_dir))
-        repo = await monitor.add_repository(repo_path)
-
-        assert repo is not None
-        assert repo.path == repo_path
-        assert repo.total_session_count >= 1
-
-        # Find the session
-        all_sessions = []
-        for wt in repo.worktrees:
-            all_sessions.extend(wt.sessions)
-
-        found = [s for s in all_sessions if s.id == session_id]
-        assert len(found) == 1
-        assert found[0].project_path == repo_path
-
-    async def test_file_watcher_reads_initial_content(
-        self, claude_dir: Path, repo_dir: Path
-    ) -> None:
-        """Start a file watcher and verify it reads existing content."""
+        """Register a transcript and verify it reads existing content."""
         repo_path = str(repo_dir)
         session_id = "watcher-init-test"
 
@@ -184,29 +168,25 @@ class TestSessionMonitoringFlow:
             + _jsonl_assistant_message("Response", model="claude-opus-4-20250514") + "\n"
         )
 
-        watcher = SessionFileWatcher(
-            claude_path=str(claude_dir),
-            approval_timeout_seconds=5,
-        )
+        registry, fw = _make_registry(tmp_path)
 
-        await watcher.start_monitoring(
+        transcript = await registry.register_transcript(
             session_id=session_id,
             project_path=repo_path,
-            session_file_path=str(session_file),
+            file_path=str(session_file),
         )
 
-        state = await watcher.get_state(session_id)
-        assert state is not None
-        assert state.message_count == 1  # one user message
-        assert state.model == "claude-opus-4-20250514"
-        assert state.output_tokens == 200
+        assert transcript.state.message_count == 1
+        assert transcript.state.model == "claude-opus-4-20250514"
+        assert transcript.state.output_tokens == 200
 
-        await watcher.shutdown()
+        await registry.stop()
+        fw.shutdown()
 
     async def test_append_lines_and_verify_state_updates(
-        self, claude_dir: Path, repo_dir: Path
+        self, claude_dir: Path, repo_dir: Path, tmp_path: Path
     ) -> None:
-        """Start watcher, append new lines to the JSONL, then refresh and verify updates."""
+        """Register transcript, append new lines, refresh and verify."""
         repo_path = str(repo_dir)
         session_id = "append-test-session"
 
@@ -215,32 +195,22 @@ class TestSessionMonitoringFlow:
             _jsonl_user_message("Initial message", "2025-06-15T10:00:00Z") + "\n"
         )
 
-        # Track state update callbacks
         received_updates: list[tuple[str, SessionMonitorState]] = []
 
-        async def on_state_update(
-            sid: str, state: SessionMonitorState
-        ) -> None:
+        async def on_state_update(sid: str, state: SessionMonitorState) -> None:
             received_updates.append((sid, state))
 
-        watcher = SessionFileWatcher(
-            claude_path=str(claude_dir),
-            approval_timeout_seconds=5,
-        )
-        watcher.on_state_update(on_state_update)
+        registry, fw = _make_registry(tmp_path)
+        registry.on_state_update(on_state_update)
 
-        await watcher.start_monitoring(
+        transcript = await registry.register_transcript(
             session_id=session_id,
             project_path=repo_path,
-            session_file_path=str(session_file),
+            file_path=str(session_file),
         )
 
-        # Verify initial state
-        state = await watcher.get_state(session_id)
-        assert state is not None
-        assert state.message_count == 1
+        assert transcript.state.message_count == 1
 
-        # Append new lines to the file
         with open(session_file, "a") as f:
             f.write(
                 _jsonl_assistant_message(
@@ -270,29 +240,25 @@ class TestSessionMonitoringFlow:
                 ) + "\n"
             )
 
-        # Force refresh (since filesystem events may not fire in test environment)
-        await watcher.refresh_state(session_id)
+        await transcript.refresh()
 
-        state = await watcher.get_state(session_id)
-        assert state is not None
-        # After refresh: only real user text messages count (tool-result turns excluded)
-        assert state.message_count >= 1
-        assert state.model == "claude-sonnet-4-20250514"
-        assert state.total_output_tokens >= 300
-        assert state.tool_calls.get("Edit", 0) >= 1
+        assert transcript.state.message_count >= 1
+        assert transcript.state.model == "claude-sonnet-4-20250514"
+        assert transcript.state.total_output_tokens >= 300
+        assert transcript.state.tool_calls.get("Edit", 0) >= 1
 
-        # Verify activities include tool operations
         tool_use_acts = [
-            a for a in state.recent_activities if a.type.kind == "tool_use"
+            a for a in transcript.state.recent_activities if a.type.kind == "tool_use"
         ]
         assert len(tool_use_acts) >= 1
 
-        await watcher.shutdown()
+        await registry.stop()
+        fw.shutdown()
 
-    async def test_full_flow_monitor_and_watcher(
-        self, claude_dir: Path, repo_dir: Path
+    async def test_full_flow_registry(
+        self, claude_dir: Path, repo_dir: Path, tmp_path: Path
     ) -> None:
-        """Full integration: monitor discovers sessions, watcher monitors them."""
+        """Full integration: registry discovers and tracks sessions."""
         repo_path = str(repo_dir)
         session_id = "full-flow-session"
 
@@ -304,38 +270,18 @@ class TestSessionMonitoringFlow:
             ) + "\n"
         )
 
-        # Step 1: Discover sessions with the monitor
-        monitor = CLISessionMonitorService(claude_data_path=str(claude_dir))
-        repo = await monitor.add_repository(repo_path)
-        assert repo is not None
-
-        all_sessions = []
-        for wt in repo.worktrees:
-            all_sessions.extend(wt.sessions)
-        found = [s for s in all_sessions if s.id == session_id]
-        assert len(found) == 1
-        session = found[0]
-
-        # Step 2: Start watcher on the discovered session
-        watcher = SessionFileWatcher(
-            claude_path=str(claude_dir),
-            approval_timeout_seconds=5,
-        )
-        await watcher.start_monitoring(
-            session_id=session.id,
-            project_path=session.project_path,
-            session_file_path=str(session_file),
+        # Register transcript
+        registry, fw = _make_registry(tmp_path)
+        transcript = await registry.register_transcript(
+            session_id=session_id,
+            project_path=repo_path,
+            file_path=str(session_file),
         )
 
-        state = await watcher.get_state(session.id)
-        assert state is not None
-        assert state.model == "claude-sonnet-4-20250514"
-        assert state.message_count == 1
+        assert transcript.state.model == "claude-sonnet-4-20250514"
+        assert transcript.state.message_count == 1
 
-        # Step 3: Stop monitoring, append more data, then re-start to avoid
-        # observer race conditions in the test environment.
-        await watcher.stop_monitoring(session.id)
-
+        # Append more data and refresh
         with open(session_file, "a") as f:
             f.write(
                 _jsonl_user_message("Now fix the tests", "2025-06-15T09:05:00Z") + "\n"
@@ -347,63 +293,17 @@ class TestSessionMonitoringFlow:
                 ) + "\n"
             )
 
-        # Step 4: Re-start monitoring (reads from scratch) and verify
-        await watcher.start_monitoring(
-            session_id=session.id,
-            project_path=session.project_path,
-            session_file_path=str(session_file),
-        )
-        state = await watcher.get_state(session.id)
-        assert state is not None
-        assert state.message_count == 2
-        assert state.total_output_tokens == 700  # 200 + 500
+        await transcript.refresh()
+        assert transcript.state.message_count == 2
+        assert transcript.state.total_output_tokens == 700  # 200 + 500
 
-        await watcher.shutdown()
+        await registry.stop()
+        fw.shutdown()
 
-    async def test_multiple_sessions_in_repo(
-        self, claude_dir: Path, repo_dir: Path
+    async def test_registry_stop_and_cleanup(
+        self, claude_dir: Path, repo_dir: Path, tmp_path: Path
     ) -> None:
-        """Verify that multiple sessions in the same repo are all discovered."""
-        repo_path = str(repo_dir)
-
-        for i in range(3):
-            sid = f"multi-session-{i:03d}"
-            sf = self._setup_session_file(claude_dir, repo_path, sid)
-            sf.write_text(
-                _jsonl_user_message(f"Message from session {i}") + "\n"
-                + _jsonl_assistant_message(f"Response {i}") + "\n"
-            )
-
-        monitor = CLISessionMonitorService(claude_data_path=str(claude_dir))
-        repo = await monitor.add_repository(repo_path)
-        assert repo is not None
-
-        all_sessions = []
-        for wt in repo.worktrees:
-            all_sessions.extend(wt.sessions)
-
-        session_ids = {s.id for s in all_sessions}
-        for i in range(3):
-            assert f"multi-session-{i:03d}" in session_ids
-
-    async def test_add_duplicate_repository_returns_none(
-        self, claude_dir: Path, repo_dir: Path
-    ) -> None:
-        """Adding the same repository twice should return None the second time."""
-        repo_path = str(repo_dir)
-        self._setup_session_file(claude_dir, repo_path, "dup-test")
-
-        monitor = CLISessionMonitorService(claude_data_path=str(claude_dir))
-        repo1 = await monitor.add_repository(repo_path)
-        assert repo1 is not None
-
-        repo2 = await monitor.add_repository(repo_path)
-        assert repo2 is None
-
-    async def test_watcher_stop_and_cleanup(
-        self, claude_dir: Path, repo_dir: Path
-    ) -> None:
-        """Stop monitoring and verify state is cleaned up."""
+        """Stop registry and verify state is cleaned up."""
         repo_path = str(repo_dir)
         session_id = "cleanup-test"
         session_file = self._setup_session_file(claude_dir, repo_path, session_id)
@@ -411,20 +311,16 @@ class TestSessionMonitoringFlow:
             _jsonl_user_message("test") + "\n"
         )
 
-        watcher = SessionFileWatcher(
-            claude_path=str(claude_dir),
-            approval_timeout_seconds=5,
-        )
-        await watcher.start_monitoring(
+        registry, fw = _make_registry(tmp_path)
+        await registry.register_transcript(
             session_id=session_id,
             project_path=repo_path,
-            session_file_path=str(session_file),
+            file_path=str(session_file),
         )
 
-        assert await watcher.get_state(session_id) is not None
+        assert registry.get_transcript(session_id) is not None
 
-        await watcher.stop_monitoring(session_id)
-        assert await watcher.get_state(session_id) is None
+        await registry.stop()
+        assert registry.get_transcript(session_id) is None
 
-        # Ensure shutdown after stop doesn't error
-        await watcher.shutdown()
+        fw.shutdown()

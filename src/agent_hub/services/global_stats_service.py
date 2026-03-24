@@ -6,9 +6,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-
-from watchdog.events import FileModifiedEvent, FileSystemEventHandler
-from watchdog.observers import Observer
+from typing import Callable
 
 from agent_hub.models.stats import (
     DailyActivity,
@@ -17,6 +15,7 @@ from agent_hub.models.stats import (
     LongestSession,
     ModelUsage,
 )
+from agent_hub.services.file_watcher import FileWatcher
 from agent_hub.services.path_utils import get_stats_cache_file
 
 logger = logging.getLogger(__name__)
@@ -28,7 +27,8 @@ class GlobalStatsService:
     def __init__(self, claude_data_path: str = "~/.claude") -> None:
         self._claude_path = str(Path(claude_data_path).expanduser())
         self._stats: GlobalStatsCache | None = None
-        self._observer: Observer | None = None
+        self._file_watcher = FileWatcher.get_instance()
+        self._file_watch_cb: Callable | None = None
         self._callbacks: list[object] = []
 
     @property
@@ -42,21 +42,20 @@ class GlobalStatsService:
         """Start watching the stats file."""
         await self._load_stats()
         stats_file = get_stats_cache_file(self._claude_path)
-        watch_dir = str(stats_file.parent)
-        if Path(watch_dir).is_dir():
-            self._observer = Observer()
-            self._observer.daemon = True
-            loop = asyncio.get_event_loop()
-            handler = _StatsFileHandler(
-                str(stats_file), self._on_file_changed, loop
-            )
-            self._observer.schedule(handler, watch_dir, recursive=False)
-            self._observer.start()
+
+        if stats_file.parent.is_dir():
+            async def _on_file_event(event_type: str, file_path: str) -> None:
+                if event_type == "modified":
+                    await self._on_file_changed()
+
+            self._file_watch_cb = _on_file_event
+            self._file_watcher.watch_file(str(stats_file), _on_file_event)
 
     async def stop(self) -> None:
-        if self._observer is not None:
-            self._observer.stop()
-            self._observer = None
+        if self._file_watch_cb is not None:
+            stats_file = get_stats_cache_file(self._claude_path)
+            self._file_watcher.unwatch_file(str(stats_file), self._file_watch_cb)
+            self._file_watch_cb = None
 
     async def refresh(self) -> None:
         await self._load_stats()
@@ -154,17 +153,3 @@ class GlobalStatsService:
             )
         except (json.JSONDecodeError, OSError, ValueError):
             logger.exception("Failed to parse stats cache")
-
-
-class _StatsFileHandler(FileSystemEventHandler):
-    def __init__(
-        self, target_path: str, callback: object, loop: asyncio.AbstractEventLoop
-    ) -> None:
-        super().__init__()
-        self._target = target_path
-        self._callback = callback
-        self._loop = loop
-
-    def on_modified(self, event: FileModifiedEvent) -> None:  # type: ignore[override]
-        if str(event.src_path) == self._target:
-            asyncio.run_coroutine_threadsafe(self._callback(), self._loop)  # type: ignore[misc]
