@@ -245,6 +245,14 @@ interface HostConnectReq {
 interface HostConnectResp { host_id: string; connected: boolean; auth_required: boolean }
 interface ConnectedHostsResp { host_ids: string[] }
 
+export interface HostInstallStatus {
+  installed: boolean;
+  running: boolean;
+  version: string | null;
+  local_version: string;
+  update_available: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // API builder — parameterised by base path so the same shape works for
 // both localhost (/api) and proxied remote hosts (/api/hosts/{id}/proxy/api)
@@ -508,5 +516,76 @@ export const api = {
         username,
         password,
       }),
+    /** Stream install output from the backend. SSH params go in the POST body. */
+    install: async (
+      hostId: string,
+      sshHost: string,
+      sshPort: number,
+      sshUser: string,
+      onOutput: (text: string) => void,
+    ): Promise<boolean> => {
+      const resp = await fetch(
+        `/api/hosts/${encodeURIComponent(hostId)}/install`,
+        {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ssh_host: sshHost, ssh_port: sshPort, ssh_user: sshUser }),
+        },
+      );
+      if (resp.status === 401) {
+        import('@/store/auth').then(({ useAuthStore }) => {
+          useAuthStore.getState().checkAuthStatus();
+        });
+      }
+      if (!resp.ok) {
+        const body = await resp.text();
+        throw new Error(body || `Install failed: ${resp.status}`);
+      }
+      const reader = resp.body?.getReader();
+      if (!reader) return false;
+      const decoder = new TextDecoder();
+      let failed = false;
+      let failSentinel: string | null = null;
+      let sentinelReceived = false;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        // First chunk contains the unique sentinel the backend will emit on failure
+        if (!sentinelReceived) {
+          const match = text.match(/^__SENTINEL__:(.+)\n/);
+          if (match) {
+            failSentinel = match[1] ?? null;
+            sentinelReceived = true;
+            // Strip the sentinel line before forwarding to the UI
+            const rest = text.slice(match[0].length);
+            if (rest) onOutput(rest);
+            continue;
+          }
+        }
+        onOutput(text);
+        if (failSentinel && text.includes(failSentinel)) failed = true;
+      }
+      // If the sentinel protocol wasn't received, the stream was malformed — treat as failure
+      if (!sentinelReceived) return false;
+      return !failed;
+    },
+    /** GET — SSH params as query strings (no secrets, acceptable for GET). */
+    installStatus: (
+      hostId: string,
+      sshHost: string,
+      sshPort: number,
+      sshUser: string,
+    ): Promise<HostInstallStatus> => {
+      const params = new URLSearchParams({
+        ssh_host: sshHost,
+        ssh_port: String(sshPort),
+        ssh_user: sshUser,
+      });
+      return get<HostInstallStatus>(
+        `/hosts/${encodeURIComponent(hostId)}/install-status?${params}`,
+      );
+    },
   },
 };

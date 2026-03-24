@@ -9,7 +9,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { HostConfig } from '@/types/hosts';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
-import { api } from '@/api/client';
+import { api, type HostInstallStatus } from '@/api/client';
 
 export type ConnectionStatus =
   | 'disconnected'
@@ -23,11 +23,21 @@ export interface HostRuntimeState {
   error: string | null;
 }
 
+export type InstallState = 'idle' | 'installing' | 'checking';
+
+export interface HostInstallState {
+  state: InstallState;
+  output: string;
+  status: HostInstallStatus | null;
+}
+
 interface HostsState {
   /** Configured remote hosts (persisted). */
   hosts: HostConfig[];
   /** Runtime connection state per host ID (not persisted). */
   runtimeState: Record<string, HostRuntimeState>;
+  /** Install state per host ID (not persisted). */
+  installState: Record<string, HostInstallState>;
 
   addHost: (config: HostConfig) => void;
   updateHost: (id: string, changes: Partial<HostConfig>) => void;
@@ -37,8 +47,33 @@ interface HostsState {
   disconnectHost: (id: string) => Promise<void>;
   authenticateHost: (id: string, username: string, password: string) => Promise<void>;
 
+  installOnHost: (id: string) => Promise<void>;
+  checkInstallStatus: (id: string) => Promise<void>;
+
   isConnected: (id: string) => boolean;
   connectedHostIds: () => string[];
+}
+
+/** Merge a partial install state into the store for a given host. */
+function _patchInstall(
+  set: (fn: (s: HostsState) => Partial<HostsState>) => void,
+  get: () => HostsState,
+  id: string,
+  patch: Partial<HostInstallState>,
+): void {
+  set((s) => {
+    const prev = s.installState[id];
+    return {
+      installState: {
+        ...s.installState,
+        [id]: {
+          state: patch.state ?? prev?.state ?? 'idle',
+          output: patch.output ?? prev?.output ?? '',
+          status: patch.status !== undefined ? patch.status : (prev?.status ?? null),
+        },
+      },
+    };
+  });
 }
 
 export const useHostsStore = create<HostsState>()(
@@ -46,6 +81,7 @@ export const useHostsStore = create<HostsState>()(
     (set, get) => ({
       hosts: [],
       runtimeState: {},
+      installState: {},
 
       addHost: (config) =>
         set((s) => {
@@ -174,6 +210,52 @@ export const useHostsStore = create<HostsState>()(
         });
       },
 
+      installOnHost: async (id) => {
+        const host = get().hosts.find((h) => h.id === id);
+        if (!host || host.kind !== 'ssh') return;
+
+        _patchInstall(set, get, id, { state: 'installing', output: '' });
+
+        try {
+          await api.hosts.install(
+            id,
+            host.sshHost,
+            host.sshPort,
+            host.sshUser,
+            (text) => {
+              const prev = get().installState[id];
+              _patchInstall(set, get, id, { output: (prev?.output ?? '') + text });
+            },
+          );
+          await get().checkInstallStatus(id);
+        } catch (err) {
+          const prev = get().installState[id];
+          _patchInstall(set, get, id, {
+            state: 'idle',
+            output: (prev?.output ?? '') + `\nERROR: ${(err as Error).message}\n`,
+          });
+        }
+      },
+
+      checkInstallStatus: async (id) => {
+        const host = get().hosts.find((h) => h.id === id);
+        if (!host || host.kind !== 'ssh') return;
+
+        _patchInstall(set, get, id, { state: 'checking' });
+
+        try {
+          const status = await api.hosts.installStatus(
+            id,
+            host.sshHost,
+            host.sshPort,
+            host.sshUser,
+          );
+          _patchInstall(set, get, id, { state: 'idle', status });
+        } catch {
+          _patchInstall(set, get, id, { state: 'idle' });
+        }
+      },
+
       isConnected: (id) => {
         if (id === LOCALHOST_HOST_ID) return true;
         return get().runtimeState[id]?.status === 'connected';
@@ -186,7 +268,7 @@ export const useHostsStore = create<HostsState>()(
     }),
     {
       name: 'agent-hub.hosts',
-      partialize: (s) => ({ hosts: s.hosts }),
+      partialize: (s: HostsState) => ({ hosts: s.hosts }),
     },
   ),
 );

@@ -15,6 +15,10 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from agent_hub.services.proxy_service import HostConfig, HostSession, ProxyService
+from agent_hub.services.remote_installer import InstallStatus, RemoteInstaller
+
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +258,180 @@ async def list_connected(request: Request) -> ConnectedHostsResponse:
     """Return host IDs that are currently connected."""
     proxy = _get_proxy(request)
     return ConnectedHostsResponse(host_ids=proxy.connected_ids())
+
+
+# ---------------------------------------------------------------------------
+# Remote install endpoints
+# ---------------------------------------------------------------------------
+
+
+class InstallRequest(BaseModel):
+    """SSH connection details for install / status check.
+
+    Sent in the POST body (not query params) to avoid leaking host info
+    into server access logs.
+    """
+
+    ssh_host: str
+    ssh_port: int = 22
+    ssh_user: str = ""
+
+
+class InstallStatusResponse(BaseModel):
+    installed: bool
+    running: bool
+    version: str | None
+    local_version: str
+    update_available: bool
+
+
+@router.post("/{host_id}/install")
+async def install_remote(
+    host_id: str, body: InstallRequest, request: Request
+) -> StreamingResponse:
+    """Install or update Agent Hub on a remote host via SSH.
+
+    Streams install output as text/plain so the frontend can display progress
+    in real time.
+    """
+
+    import uuid
+
+    # Unique per-request sentinel — cannot collide with script output
+    fail_sentinel = f"__INSTALL_FAILED_{uuid.uuid4().hex}__"
+
+    async def generate() -> asyncio.AsyncGenerator[str, None]:
+        async with _ssh_for_install(host_id, body, request) as ssh_conn:
+            queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+            async def on_output(text: str) -> None:
+                await queue.put(text)
+
+            async def _run_install() -> None:
+                try:
+                    success = await RemoteInstaller.install(ssh_conn, on_output)
+                    if not success:
+                        await queue.put(f"\n{fail_sentinel}\n")
+                except Exception as exc:
+                    await queue.put(f"ERROR: {exc}\n")
+                finally:
+                    await queue.put(None)  # sentinel — end of stream
+
+            task = asyncio.create_task(_run_install())
+            try:
+                # Yield the sentinel to the frontend as the very first chunk
+                # so it knows what to look for.
+                yield f"__SENTINEL__:{fail_sentinel}\n"
+                while True:
+                    chunk = await queue.get()
+                    if chunk is None:
+                        break
+                    yield chunk
+            finally:
+                if not task.done():
+                    task.cancel()
+                    # Await so the task's finally block runs (closes resources)
+                    await asyncio.gather(task, return_exceptions=True)
+
+    return StreamingResponse(generate(), media_type="text/plain")
+
+
+@router.get("/{host_id}/install-status", response_model=InstallStatusResponse)
+async def install_status(host_id: str, request: Request) -> InstallStatusResponse:
+    """Check whether Agent Hub is installed and running on a remote host.
+
+    SSH params are passed as query params (acceptable for GET — no secrets).
+    """
+    params = request.query_params
+    body = InstallRequest(
+        ssh_host=params.get("ssh_host", ""),
+        ssh_port=int(params.get("ssh_port", "22")),
+        ssh_user=params.get("ssh_user", ""),
+    )
+
+    try:
+        async with _ssh_for_install(host_id, body, request) as ssh_conn:
+            status: InstallStatus = await RemoteInstaller.check_status(ssh_conn)
+    except HTTPException:
+        local_ver = RemoteInstaller.local_version()
+        return InstallStatusResponse(
+            installed=False,
+            running=False,
+            version=None,
+            local_version=local_ver,
+            update_available=False,
+        )
+
+    local_ver = RemoteInstaller.local_version()
+    update_available = (
+        status["installed"]
+        and status["version"] is not None
+        and status["version"] != local_ver
+    )
+
+    return InstallStatusResponse(
+        installed=status["installed"],
+        running=status["running"],
+        version=status["version"],
+        local_version=local_ver,
+        update_available=update_available,
+    )
+
+
+@asynccontextmanager
+async def _ssh_for_install(
+    host_id: str, body: InstallRequest, request: Request
+) -> AsyncIterator[object]:
+    """Yield an SSH connection for install operations, closing it on exit.
+
+    If the host is already connected via ProxyService, reuses that connection
+    (and does *not* close it).  Otherwise opens a temporary one from stored
+    credentials and closes it when the block exits.
+    """
+    import asyncssh  # type: ignore[import-untyped]
+
+    proxy = _get_proxy(request)
+    hs = proxy.get(host_id)
+
+    if hs is not None and hs.ssh_conn is not None:
+        # Reuse the existing session — do not close on exit
+        yield hs.ssh_conn
+        return
+
+    # Open a temporary connection
+    cred_store = request.app.state.provider.credential_store
+
+    ssh_password = cred_store.retrieve(f"host:{host_id}:ssh_password") or ""
+    ssh_key = cred_store.retrieve(f"host:{host_id}:ssh_key") or ""
+
+    if not body.ssh_host:
+        raise HTTPException(
+            status_code=400,
+            detail="ssh_host is required (in body or via active connection)",
+        )
+
+    connect_kwargs: dict[str, object] = {
+        "host": body.ssh_host,
+        "port": body.ssh_port,
+        "username": body.ssh_user or None,
+        # TODO: Support host key verification / pinning.  Currently uses
+        # trust-on-first-use (same as ProxyService._create_ssh_session).
+        "known_hosts": None,
+    }
+    if ssh_password:
+        connect_kwargs["password"] = ssh_password
+    if ssh_key:
+        connect_kwargs["client_keys"] = [asyncssh.import_private_key(ssh_key)]
+
+    try:
+        conn = await asyncssh.connect(**connect_kwargs)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"SSH connection failed: {exc}") from exc
+
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

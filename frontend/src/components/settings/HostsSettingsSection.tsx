@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { useHostsStore, type ConnectionStatus } from '@/store/hosts';
+import React, { useRef, useEffect, useState } from 'react';
+import { useHostsStore, type ConnectionStatus, type HostInstallState } from '@/store/hosts';
 import type { HostConfig } from '@/types/hosts';
 import { defaultHostConfig } from '@/types/hosts';
 import { api } from '@/api/client';
@@ -103,9 +103,116 @@ const RemoteAuthPrompt: React.FC<{ hostId: string }> = ({ hostId }) => {
   );
 };
 
+/** Install status badge for an SSH host. */
+const InstallStatusBadge: React.FC<{ installState: HostInstallState | undefined }> = ({ installState }) => {
+  if (!installState?.status) return null;
+  const { status } = installState;
+
+  if (status.running) {
+    return (
+      <span className="provider-badge" style={{ marginLeft: 4, color: 'var(--accent-green, #3fb950)' }}>
+        v{status.version}
+        {status.update_available && (
+          <span style={{ color: 'var(--accent-yellow, #d29922)', marginLeft: 4 }}>
+            update → {status.local_version}
+          </span>
+        )}
+      </span>
+    );
+  }
+  if (status.installed) {
+    return (
+      <span className="provider-badge" style={{ marginLeft: 4, color: 'var(--accent-yellow, #d29922)' }}>
+        v{status.version} (stopped)
+      </span>
+    );
+  }
+  return (
+    <span className="provider-badge" style={{ marginLeft: 4, color: 'var(--text-tertiary)' }}>
+      not installed
+    </span>
+  );
+};
+
+/** Install output log and action buttons for an SSH host. */
+const InstallPanel: React.FC<{ hostId: string }> = ({ hostId }) => {
+  const { installState, installOnHost, checkInstallStatus } = useHostsStore();
+  const is = installState[hostId];
+  const logRef = useRef<HTMLPreElement>(null);
+
+  // Check status on mount / host change if we haven't fetched it yet.
+  // Read from the store directly inside the effect to avoid dep-array issues.
+  useEffect(() => {
+    const cur = useHostsStore.getState().installState[hostId];
+    if (!cur?.status && cur?.state !== 'checking' && cur?.state !== 'installing') {
+      checkInstallStatus(hostId);
+    }
+  }, [hostId, checkInstallStatus]);
+
+  // Auto-scroll log output
+  useEffect(() => {
+    if (logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight;
+    }
+  }, [is?.output]);
+
+  const isInstalling = is?.state === 'installing';
+  const isChecking = is?.state === 'checking';
+  const hasOutput = !!is?.output;
+
+  return (
+    <div style={{ marginTop: 'var(--space-xs)' }}>
+      <div style={{ display: 'flex', gap: 'var(--space-xs)', alignItems: 'center' }}>
+        <button
+          className="btn btn-primary btn-xs"
+          onClick={() => installOnHost(hostId)}
+          disabled={isInstalling || isChecking}
+        >
+          {isInstalling
+            ? 'Installing...'
+            : is?.status?.update_available
+              ? 'Update'
+              : is?.status?.installed
+                ? 'Reinstall'
+                : 'Install Agent Hub'}
+        </button>
+        <button
+          className="btn btn-ghost btn-xs"
+          onClick={() => checkInstallStatus(hostId)}
+          disabled={isInstalling || isChecking}
+        >
+          {isChecking ? 'Checking...' : 'Check Status'}
+        </button>
+      </div>
+      {hasOutput && (
+        <pre
+          ref={logRef}
+          style={{
+            marginTop: 'var(--space-xs)',
+            padding: 'var(--space-xs)',
+            fontSize: 'var(--font-size-xs)',
+            lineHeight: 1.4,
+            background: 'var(--bg-tertiary, #161b22)',
+            borderRadius: 4,
+            maxHeight: 200,
+            overflow: 'auto',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-all',
+            fontFamily: 'monospace',
+            color: 'var(--text-secondary)',
+          }}
+        >
+          {is.output}
+        </pre>
+      )}
+    </div>
+  );
+};
+
 export const HostsSettingsSection: React.FC = () => {
-  const { hosts, runtimeState, addHost, removeHost, connectHost, disconnectHost } =
+  const { hosts, runtimeState, installState, addHost, removeHost, connectHost, disconnectHost } =
     useHostsStore();
+  const [expandedInstall, setExpandedInstall] = useState<string | null>(null);
 
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<HostFormState>(emptyForm());
@@ -339,60 +446,77 @@ export const HostsSettingsSection: React.FC = () => {
         const rt = runtimeState[host.id];
         const status: ConnectionStatus = rt?.status ?? 'disconnected';
         const isConnecting = connectingId === host.id;
+        const is = installState[host.id];
+        const showInstall = expandedInstall === host.id;
 
         return (
-          <div key={host.id} className="host-row">
-            <span className="status-dot" style={{ backgroundColor: statusColor(status), flexShrink: 0 }} />
-            <div className="host-row-info">
-              <span className="host-row-label">{host.label}</span>
-              <span className="host-row-meta">
-                {host.kind === 'direct' ? host.baseUrl : `${host.sshUser}@${host.sshHost}:${host.sshPort} → :${host.remotePort}`}
-                {host.sshAuthMethod && (
-                  <span className="provider-badge" style={{ marginLeft: 4 }}>
-                    {host.sshAuthMethod === 'key' ? 'key' : 'password'}
+          <div key={host.id} className="host-row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
+              <span className="status-dot" style={{ backgroundColor: statusColor(status), flexShrink: 0 }} />
+              <div className="host-row-info">
+                <span className="host-row-label">
+                  {host.label}
+                  {host.kind === 'ssh' && <InstallStatusBadge installState={is} />}
+                </span>
+                <span className="host-row-meta">
+                  {host.kind === 'direct' ? host.baseUrl : `${host.sshUser}@${host.sshHost}:${host.sshPort} → :${host.remotePort}`}
+                  {host.sshAuthMethod && (
+                    <span className="provider-badge" style={{ marginLeft: 4 }}>
+                      {host.sshAuthMethod === 'key' ? 'key' : 'password'}
+                    </span>
+                  )}
+                </span>
+                {rt?.error && (
+                  <span className="text-error" style={{ fontSize: 'var(--font-size-xs)' }}>
+                    {rt.error}
                   </span>
                 )}
-              </span>
-              {rt?.error && (
-                <span className="text-error" style={{ fontSize: 'var(--font-size-xs)' }}>
-                  {rt.error}
-                </span>
-              )}
-              {status === 'auth_required' && <RemoteAuthPrompt hostId={host.id} />}
-            </div>
-            <div className="host-row-actions">
-              {status === 'connected' ? (
+                {status === 'auth_required' && <RemoteAuthPrompt hostId={host.id} />}
+              </div>
+              <div className="host-row-actions">
+                {host.kind === 'ssh' && (
+                  <button
+                    className="btn btn-ghost btn-xs"
+                    onClick={() => setExpandedInstall(showInstall ? null : host.id)}
+                    title="Remote install"
+                  >
+                    {showInstall ? 'Hide Install' : 'Install'}
+                  </button>
+                )}
+                {status === 'connected' ? (
+                  <button
+                    className="btn btn-ghost btn-xs"
+                    onClick={() => disconnectHost(host.id)}
+                  >
+                    Disconnect
+                  </button>
+                ) : status === 'auth_required' ? (
+                  <button
+                    className="btn btn-ghost btn-xs"
+                    onClick={() => disconnectHost(host.id)}
+                  >
+                    Cancel
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn-primary btn-xs"
+                    onClick={() => handleConnect(host.id)}
+                    disabled={isConnecting || status === 'connecting'}
+                  >
+                    {isConnecting ? 'Connecting...' : 'Connect'}
+                  </button>
+                )}
                 <button
                   className="btn btn-ghost btn-xs"
-                  onClick={() => disconnectHost(host.id)}
+                  style={{ color: 'var(--accent-red, #ff7b72)' }}
+                  onClick={() => removeHost(host.id)}
+                  title="Remove host"
                 >
-                  Disconnect
+                  ✕
                 </button>
-              ) : status === 'auth_required' ? (
-                <button
-                  className="btn btn-ghost btn-xs"
-                  onClick={() => disconnectHost(host.id)}
-                >
-                  Cancel
-                </button>
-              ) : (
-                <button
-                  className="btn btn-primary btn-xs"
-                  onClick={() => handleConnect(host.id)}
-                  disabled={isConnecting || status === 'connecting'}
-                >
-                  {isConnecting ? 'Connecting...' : 'Connect'}
-                </button>
-              )}
-              <button
-                className="btn btn-ghost btn-xs"
-                style={{ color: 'var(--accent-red, #ff7b72)' }}
-                onClick={() => removeHost(host.id)}
-                title="Remove host"
-              >
-                ✕
-              </button>
+              </div>
             </div>
+            {showInstall && <InstallPanel hostId={host.id} />}
           </div>
         );
       })}
