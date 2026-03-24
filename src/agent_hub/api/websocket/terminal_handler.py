@@ -1,8 +1,8 @@
 """WebSocket endpoint for bridging a PTY file descriptor to xterm.js.
 
 Each terminal session gets its own WebSocket at ``/ws/terminal/{key}``.
-The handler reads from the PTY fd using ``asyncio`` and forwards bytes to
-the WebSocket, while also writing WebSocket input back to the PTY.
+The handler subscribes to the persistent PTY drain in ProcessRegistry
+for output, and writes user input directly to the PTY fd.
 """
 
 from __future__ import annotations
@@ -11,8 +11,6 @@ import asyncio
 import json
 import logging
 import os
-import struct
-from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -20,9 +18,6 @@ from agent_hub.services.process_registry import ProcessRegistry
 from agent_hub.services.terminal_launcher import resize_terminal
 
 logger = logging.getLogger(__name__)
-
-# Maximum bytes to read per PTY read cycle.
-_READ_CHUNK_SIZE = 4096
 
 
 def _get_registry(ws: WebSocket) -> ProcessRegistry:
@@ -38,60 +33,80 @@ def _get_registry(ws: WebSocket) -> ProcessRegistry:
     raise RuntimeError("No ProcessRegistry found in app state")
 
 
-async def _read_pty(fd: int, ws: WebSocket, cancel_event: asyncio.Event) -> None:
-    """Continuously read from the PTY fd and send data to the WebSocket.
+# DEC synchronized output markers (mode 2026).
+# BSU = Begin Synchronized Update, ESU = End Synchronized Update.
+_BSU = b"\x1b[?2026h"
+_ESU = b"\x1b[?2026l"
 
-    Uses ``asyncio.get_event_loop().add_reader`` to avoid blocking the loop.
+# Max time to wait for ESU after seeing BSU before flushing anyway.
+_SYNC_TIMEOUT = 0.2  # 200ms
+
+
+async def _forward_output(
+    queue: asyncio.Queue[bytes | None],
+    ws: WebSocket,
+    cancel_event: asyncio.Event,
+) -> None:
+    """Read from the registry's output queue and send to the WebSocket.
+
+    Buffers output between synchronized update markers (DEC mode 2026)
+    so that xterm.js receives complete redraws as single write() calls.
     """
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    buf: list[bytes] = []
+    in_sync = False
 
-    def _on_readable() -> None:
-        """Called by the event loop when the fd has data available."""
+    async def _flush() -> bool:
+        """Flush buffered data to the WS. Returns False on send failure."""
+        nonlocal buf
+        if not buf:
+            return True
+        payload = b"".join(buf)
+        buf = []
         try:
-            data = os.read(fd, _READ_CHUNK_SIZE)
-            if data:
-                queue.put_nowait(data)
-            else:
-                # EOF -- process exited
-                queue.put_nowait(None)
-        except OSError:
-            queue.put_nowait(None)
-
-    try:
-        loop.add_reader(fd, _on_readable)
-
-        while not cancel_event.is_set():
-            try:
-                data = await asyncio.wait_for(queue.get(), timeout=0.5)
-            except asyncio.TimeoutError:
-                continue
-
-            if data is None:
-                # Process exited
-                break
-
-            try:
-                # xterm.js expects text frames for terminal output
-                text = data.decode("utf-8", errors="replace")
-                await ws.send_text(text)
-            except Exception:
-                break
-
-    finally:
-        try:
-            loop.remove_reader(fd)
+            await ws.send_text(payload.decode("utf-8", errors="replace"))
+            return True
         except Exception:
-            pass
+            return False
+
+    while not cancel_event.is_set():
+        timeout = _SYNC_TIMEOUT if in_sync else 0.5
+        try:
+            data = await asyncio.wait_for(queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            if in_sync:
+                # Timed out waiting for ESU — flush what we have
+                in_sync = False
+                if not await _flush():
+                    break
+            continue
+
+        if data is None:
+            await _flush()
+            break  # Process exited
+
+        buf.append(data)
+
+        if _BSU in data:
+            in_sync = True
+        if _ESU in data:
+            in_sync = False
+            if not await _flush():
+                break
+        elif not in_sync:
+            if not await _flush():
+                break
 
 
 async def _write_pty(
-    fd: int, ws: WebSocket, cancel_event: asyncio.Event
+    fd: int,
+    ws: WebSocket,
+    cancel_event: asyncio.Event,
+    registry: ProcessRegistry,
+    key: str,
 ) -> None:
-    """Continuously read from the WebSocket and write to the PTY fd.
+    """Read from the WebSocket and write to the PTY fd.
 
     Handles both plain text input and JSON-formatted resize messages.
-    A resize message is a JSON object: ``{"type": "resize", "rows": N, "cols": N}``.
     """
     while not cancel_event.is_set():
         try:
@@ -119,7 +134,8 @@ async def _write_pty(
             except (json.JSONDecodeError, ValueError, TypeError):
                 pass  # Not a JSON message -- treat as terminal input
 
-        # Write raw input to the PTY
+        # Write raw input to the PTY and notify activity
+        registry.notify_input_activity(key)
         try:
             os.write(fd, raw.encode("utf-8"))
         except OSError:
@@ -132,8 +148,8 @@ async def _write_pty(
 async def terminal_websocket_endpoint(ws: WebSocket, key: str) -> None:
     """WebSocket endpoint at ``/ws/terminal/{key}``.
 
-    Bridges the PTY file descriptor for the terminal identified by ``key``
-    with the xterm.js frontend via a WebSocket.
+    Bridges the PTY output (via ProcessRegistry drain) and user input
+    for the terminal identified by ``key`` with the xterm.js frontend.
     """
     registry = _get_registry(ws)
     proc = registry.get(key)
@@ -145,24 +161,24 @@ async def terminal_websocket_endpoint(ws: WebSocket, key: str) -> None:
     await ws.accept()
     logger.info("Terminal WebSocket connected: key=%s fd=%d pid=%d", key, proc.fd, proc.pid)
 
+    # Subscribe to the persistent drain loop's output.
+    # The ring buffer snapshot is replayed immediately so the client
+    # sees recent output; Claude's next TUI redraw fills in the rest.
+    output_queue = registry.subscribe(key)
     cancel_event = asyncio.Event()
 
-    # Run the reader and writer concurrently
-    reader_task = asyncio.create_task(_read_pty(proc.fd, ws, cancel_event))
-    writer_task = asyncio.create_task(_write_pty(proc.fd, ws, cancel_event))
+    reader_task = asyncio.create_task(_forward_output(output_queue, ws, cancel_event))
+    writer_task = asyncio.create_task(
+        _write_pty(proc.fd, ws, cancel_event, registry, key)
+    )
 
     try:
-        # Wait for either task to finish (which means the connection or
-        # process has ended)
         done, pending = await asyncio.wait(
             [reader_task, writer_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-
-        # Signal the other task to stop
         cancel_event.set()
 
-        # Give the pending task a moment to finish cleanly
         for task in pending:
             task.cancel()
             try:
@@ -177,6 +193,7 @@ async def terminal_websocket_endpoint(ws: WebSocket, key: str) -> None:
         writer_task.cancel()
 
     finally:
+        registry.unsubscribe(key)
         logger.info("Terminal WebSocket disconnected: key=%s", key)
         try:
             await ws.close()

@@ -287,6 +287,7 @@ class AgentHubProvider:
 
         await self.session_manager.start()
         self.session_manager.set_tracker(self.process_tracker)
+        self.session_manager.set_process_registry(self.process_registry)
         logger.info("SessionManager started")
 
         logger.info("AgentHubProvider initialised successfully.")

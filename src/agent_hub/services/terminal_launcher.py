@@ -20,6 +20,7 @@ class TerminalProcess:
     fd: int
     session_id: str | None = None
     project_path: str = ""
+    had_user_input: bool = False
 
 
 def find_cli_command(command: str, additional_paths: list[str] | None = None) -> str | None:

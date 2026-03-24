@@ -1,6 +1,6 @@
 import { SessionId } from '@/types/session';
 import { useSessionsStore } from '@/store/sessions';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
@@ -21,17 +21,27 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const terminalKeyRef = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const sessionUpdate = useSessionsStore((s) => s.sessionUpdates[sessionId]);
   // Block only when SessionManager explicitly says not connectable.
   // No sessionUpdate yet = allow (backend will 409 if needed).
   const cannotConnect = sessionUpdate ? !sessionUpdate.is_connectable : false;
 
+  const handleKill = useCallback(() => {
+    const key = terminalKeyRef.current;
+    if (key) {
+      api.terminal.kill(key).catch(() => {});
+      terminalKeyRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     if (!terminalRef.current || cannotConnect) return;
 
     const terminal = new Terminal({
       cursorBlink: true,
+      scrollOnOutput: false,
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Menlo, monospace",
       theme: {
@@ -85,13 +95,6 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
 
     xtermRef.current = terminal;
 
-    // Welcome message
-    terminal.writeln('\x1b[36m--- AgentHub Terminal ---\x1b[0m');
-    terminal.writeln(`\x1b[90mLaunching terminal for session: ${sessionId}\x1b[0m`);
-    terminal.writeln('');
-
-    let terminalKey: string | null = null;
-
     // Launch the terminal via REST API, then connect via dedicated WebSocket
     api.terminal
       .launch({
@@ -101,12 +104,7 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
       })
       .then((resp) => {
         if (!xtermRef.current) return; // component unmounted
-        terminalKey = resp.key;
-
-        terminal.writeln(
-          `\x1b[32mConnected.\x1b[0m \x1b[90m(key: ${resp.key}, pid: ${resp.pid})\x1b[0m`,
-        );
-        terminal.writeln('');
+        terminalKeyRef.current = resp.key;
 
         // Open a dedicated WebSocket to /ws/terminal/{key}
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -187,21 +185,14 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
       resizeObserver.observe(terminalRef.current);
     }
 
-    // Cleanup on unmount
+    // Cleanup on unmount: disconnect UI only, keep backend process alive
     return () => {
       resizeObserver.disconnect();
 
-      // Close the dedicated terminal WS
+      // Close the dedicated terminal WS (does NOT kill the backend process)
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
-      }
-
-      // Kill the terminal on the backend
-      if (terminalKey) {
-        api.terminal.kill(terminalKey).catch(() => {
-          // Best-effort cleanup
-        });
       }
 
       webglAddonRef.current?.dispose();
@@ -263,6 +254,13 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
             title="Fit terminal"
           >
             Fit
+          </button>
+          <button
+            className="terminal-btn terminal-btn-danger"
+            onClick={handleKill}
+            title="Kill terminal process"
+          >
+            Kill
           </button>
         </div>
       </div>

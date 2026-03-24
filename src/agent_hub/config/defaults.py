@@ -38,6 +38,13 @@ DEV_SERVER_READINESS_TIMEOUT: float = 30.0
 # Terminal
 MAX_TERMINAL_SCROLLBACK: int = 10000
 
+# Hub process idle cleanup (milliseconds).
+# Kill hub-spawned process after this idle time (no PTY I/O) when no attention flag.
+STOP_IDLE_PROCESS_MS: int = 5 * 60 * 1000  # 5 minutes
+# Kill hub-spawned process after this time when attention flag is set.
+# 0 = never kill while awaiting user input.
+STOP_NOANSWER_PROCESS_MS: int = 0
+
 # Recent activities cap
 MAX_RECENT_ACTIVITIES: int = 50
 

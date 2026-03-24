@@ -362,11 +362,11 @@ class ClaudeProcessTracker:
             return
 
         last_entry: dict[int, _PidSessionEntry] = {}
-        new_attention: list[_AttentionEntry] = []
+        all_attention: list[_AttentionEntry] = []
         try:
             with open(self._sessions_file, "rb") as f:
                 for raw_line in f:
-                    self._parse_line(raw_line, last_entry, new_attention)
+                    self._parse_line(raw_line, last_entry, all_attention)
                 self._file_offset = f.tell()
         except OSError:
             logger.exception("Failed to read %s", self._sessions_file)
@@ -382,12 +382,24 @@ class ClaudeProcessTracker:
                 self._pid_to_entry[pid] = entry
                 self._session_to_pid[entry.session_id] = pid
 
-        # Restore pending attention for live sessions only.
-        # On full parse we don't fire callbacks — the hub will send the
-        # current list to new websocket clients on connect.
+        # Determine the most recent SessionStart timestamp per session.
+        # Only attention entries *after* the last SessionStart are valid —
+        # earlier ones belong to a previous session incarnation.
+        session_start_ts: dict[str, float] = {}
+        for entry in last_entry.values():
+            if entry.hook_event_name == "SessionStart" and entry.session_id:
+                prev = session_start_ts.get(entry.session_id, 0)
+                if entry.ts > prev:
+                    session_start_ts[entry.session_id] = entry.ts
+
+        # Restore pending attention for live sessions only, filtering out
+        # entries that predate the most recent SessionStart.
         live_sessions = set(self._session_to_pid.keys())
-        for att in new_attention:
-            if att.session_id in live_sessions:
+        for att in all_attention:
+            if att.session_id not in live_sessions:
+                continue
+            start_ts = session_start_ts.get(att.session_id, 0)
+            if att.ts >= start_ts:
                 self._pending_attention[(att.session_id, att.tool_use_id)] = att
 
     def _parse_incremental(self) -> tuple[bool, list[_AttentionEntry], list[tuple[str, str]]]:
@@ -467,14 +479,25 @@ class ClaudeProcessTracker:
     def resolve_attention(self, session_id: str, tool_use_id: str) -> bool:
         """Resolve a specific attention entry (called by transcript watcher).
 
-        Returns True if the entry existed and was removed.
+        Returns True if any entry was removed.
         """
+        resolved = False
         key = (session_id, tool_use_id)
         if key in self._pending_attention:
             del self._pending_attention[key]
+            resolved = True
+
+        # Also clear entries with empty tool_use_id for this session — these
+        # come from hooks that don't provide tool_use_id. Any tool_result
+        # for the session means the agent moved past the attention state.
+        empty_key = (session_id, "")
+        if empty_key in self._pending_attention:
+            del self._pending_attention[empty_key]
+            resolved = True
+
+        if resolved:
             self._fire_attention_resolved_callbacks(session_id, tool_use_id)
-            return True
-        return False
+        return resolved
 
     @staticmethod
     def _parse_line(

@@ -14,11 +14,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Callable
 
+from agent_hub.config.defaults import STOP_IDLE_PROCESS_MS, STOP_NOANSWER_PROCESS_MS
 from agent_hub.models.monitor_state import SessionMonitorState
 from agent_hub.models.process_info import ClaudeProcessCategory, ClaudeProcessInfo
 
 if TYPE_CHECKING:
     from agent_hub.services.claude_process_tracker import ClaudeProcessTracker
+    from agent_hub.services.process_registry import ProcessRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +128,8 @@ class SessionManager:
         self._lock = asyncio.Lock()
         # Per-session debounce: session_id -> scheduled Task
         self._pending_broadcasts: dict[str, asyncio.Task] = {}
+        self._cleanup_task: asyncio.Task | None = None
+        self._process_registry: ProcessRegistry | None = None
 
     # ------------------------------------------------------------------
     # Callback registration
@@ -312,6 +316,74 @@ class SessionManager:
     def set_tracker(self, tracker: ClaudeProcessTracker) -> None:
         self._tracker = tracker
 
+    def set_process_registry(self, registry: ProcessRegistry) -> None:
+        self._process_registry = registry
+        registry.set_activity_callback(self.handle_terminal_activity)
+
+    # ------------------------------------------------------------------
+    # Terminal I/O activity
+    # ------------------------------------------------------------------
+
+    async def handle_terminal_activity(self, session_id: str) -> None:
+        """Called by ProcessRegistry on PTY output or input.
+
+        Updates ``last_activity_at`` without triggering a broadcast
+        (to avoid flooding WS with timestamp-only updates).
+        """
+        session = self._sessions.get(session_id)
+        if session is not None:
+            session.last_activity_at = datetime.now(tz=timezone.utc)
+
+    # ------------------------------------------------------------------
+    # Idle hub process cleanup
+    # ------------------------------------------------------------------
+
+    async def _cleanup_loop(self) -> None:
+        """Periodically kill idle hub-spawned processes."""
+        interval = 30.0  # check every 30s
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self._cleanup_idle_hub_processes()
+            except Exception:
+                logger.debug("Cleanup loop error", exc_info=True)
+
+    async def _cleanup_idle_hub_processes(self) -> None:
+        if self._process_registry is None:
+            return
+
+        now = datetime.now(tz=timezone.utc)
+
+        async with self._lock:
+            for sid, session in list(self._sessions.items()):
+                if session.process is None:
+                    continue
+                if session.process.category != ClaudeProcessCategory.hub:
+                    continue
+                if session.last_activity_at is None:
+                    continue
+
+                idle_ms = (now - session.last_activity_at).total_seconds() * 1000
+                needs_attention = self.get_needs_attention(sid)
+
+                if needs_attention:
+                    timeout_ms = STOP_NOANSWER_PROCESS_MS
+                else:
+                    timeout_ms = STOP_IDLE_PROCESS_MS
+
+                if timeout_ms <= 0:
+                    continue  # 0 = never kill
+
+                if idle_ms >= timeout_ms:
+                    logger.info(
+                        "Killing idle hub process for session %s "
+                        "(idle %.0fs, attention=%s)",
+                        sid[:8],
+                        idle_ms / 1000,
+                        needs_attention,
+                    )
+                    self._process_registry.terminate(sid)
+
     # ------------------------------------------------------------------
     # Internal: debounced notification
     # ------------------------------------------------------------------
@@ -340,11 +412,15 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """No-op for now — manager is stateless on startup."""
+        """Start the idle process cleanup loop."""
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         logger.info("SessionManager started")
 
     async def stop(self) -> None:
-        """Cancel any pending debounce tasks."""
+        """Cancel any pending debounce tasks and the cleanup loop."""
+        if self._cleanup_task is not None:
+            self._cleanup_task.cancel()
+            self._cleanup_task = None
         for task in self._pending_broadcasts.values():
             task.cancel()
         self._pending_broadcasts.clear()
