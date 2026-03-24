@@ -41,7 +41,6 @@ export const EmbeddedTerminal: React.FC<EmbeddedTerminalProps> = ({
 
     const terminal = new Terminal({
       cursorBlink: true,
-      scrollOnOutput: false,
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Menlo, monospace",
       theme: {

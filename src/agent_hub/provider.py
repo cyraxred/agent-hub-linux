@@ -23,6 +23,8 @@ from agent_hub.services.session_parse_cache import SessionParseCache
 
 if TYPE_CHECKING:
     from agent_hub.services import git_worktree_service as _git_mod
+    from agent_hub.services.auth_service import AuthService
+    from agent_hub.services.credential_store import CredentialStore
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,8 @@ class AgentHubProvider:
         self._process_tracker: ClaudeProcessTracker | None = None
         self._session_manager: SessionManager | None = None
         self._dev_server_manager: DevServerManager | None = None
+        self._auth_service: AuthService | None = None
+        self._credential_store: CredentialStore | None = None
         self._proxy_service: object | None = None  # ProxyService — imported lazily
 
     # ------------------------------------------------------------------
@@ -204,6 +208,22 @@ class AgentHubProvider:
                 db_path=self._settings.db_path,
             )
         return self._metadata_store
+
+    @property
+    def auth_service(self) -> AuthService:
+        if self._auth_service is None:
+            from agent_hub.services.auth_service import AuthService
+
+            self._auth_service = AuthService(self.metadata_store)
+        return self._auth_service
+
+    @property
+    def credential_store(self) -> CredentialStore:
+        if self._credential_store is None:
+            from agent_hub.services.credential_store import CredentialStore
+
+            self._credential_store = CredentialStore(self._settings.app_data_dir)
+        return self._credential_store
 
     @property
     def process_registry(self) -> ProcessRegistry:

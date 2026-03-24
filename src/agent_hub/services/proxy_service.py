@@ -48,6 +48,7 @@ class HostSession:
     base_url: str         # resolved base URL (may differ from config for SSH hosts)
     ssh_conn: object | None = None    # asyncssh.SSHClientConnection
     ssh_listener: object | None = None  # asyncssh local port forward listener
+    remote_auth_token: str | None = None  # PAM auth token for the remote Agent Hub
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 

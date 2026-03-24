@@ -93,6 +93,15 @@ export class WebSocketClient {
       this._connected = false;
       this.notifyConnectionHandlers(false);
 
+      if (event.code === 4401) {
+        // Auth required — trigger login page, don't reconnect
+        this.intentionallyClosed = true;
+        import('@/store/auth').then(({ useAuthStore }) => {
+          useAuthStore.getState().checkAuthStatus();
+        });
+        return;
+      }
+
       if (!this.intentionallyClosed) {
         this.scheduleReconnect();
       }

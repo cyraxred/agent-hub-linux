@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { useHostsStore, type ConnectionStatus } from '@/store/hosts';
 import type { HostConfig } from '@/types/hosts';
-import { LOCALHOST_HOST_ID, defaultHostConfig } from '@/types/hosts';
-import { vaultSet, vaultHas } from '@/lib/vault';
+import { defaultHostConfig } from '@/types/hosts';
+import { api } from '@/api/client';
 
 function genId(): string {
   return crypto.randomUUID();
@@ -12,8 +12,19 @@ function statusColor(status: ConnectionStatus): string {
   switch (status) {
     case 'connected': return 'var(--accent-green, #3fb950)';
     case 'connecting': return 'var(--accent-yellow, #d29922)';
+    case 'auth_required': return 'var(--accent-yellow, #d29922)';
     case 'error': return 'var(--accent-red, #ff7b72)';
     default: return 'var(--text-tertiary)';
+  }
+}
+
+function statusLabel(status: ConnectionStatus): string {
+  switch (status) {
+    case 'connected': return 'Connected';
+    case 'connecting': return 'Connecting...';
+    case 'auth_required': return 'Auth required';
+    case 'error': return 'Error';
+    default: return 'Disconnected';
   }
 }
 
@@ -26,7 +37,7 @@ interface HostFormState {
   sshUser: string;
   remotePort: string;
   sshAuthMethod: 'password' | 'key' | 'none';
-  credential: string; // password or PEM key content — never persisted
+  credential: string; // password or PEM key content — sent to backend, not stored here
 }
 
 function emptyForm(): HostFormState {
@@ -42,6 +53,55 @@ function emptyForm(): HostFormState {
     credential: '',
   };
 }
+
+/** Inline PAM authentication prompt for a remote host. */
+const RemoteAuthPrompt: React.FC<{ hostId: string }> = ({ hostId }) => {
+  const { authenticateHost } = useHostsStore();
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setError(null);
+    try {
+      await authenticateHost(hostId, username, password);
+    } catch (err) {
+      setError((err as Error).message || 'Authentication failed');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} style={{ display: 'flex', gap: 'var(--space-xs)', alignItems: 'center', marginTop: 'var(--space-xs)' }}>
+      <input
+        className="setting-input"
+        style={{ width: 100 }}
+        type="text"
+        placeholder="Username"
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+        autoComplete="username"
+      />
+      <input
+        className="setting-input"
+        style={{ width: 100 }}
+        type="password"
+        placeholder="Password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        autoComplete="current-password"
+      />
+      <button className="btn btn-primary btn-xs" type="submit" disabled={submitting || !username || !password}>
+        {submitting ? '...' : 'Auth'}
+      </button>
+      {error && <span className="text-error" style={{ fontSize: 'var(--font-size-xs)' }}>{error}</span>}
+    </form>
+  );
+};
 
 export const HostsSettingsSection: React.FC = () => {
   const { hosts, runtimeState, addHost, removeHost, connectHost, disconnectHost } =
@@ -69,12 +129,6 @@ export const HostsSettingsSection: React.FC = () => {
     setFormError(null);
     try {
       const id = genId();
-      let vaultKeyRef: string | null = null;
-
-      if (form.kind === 'ssh' && form.credential.trim() && form.sshAuthMethod !== 'none') {
-        vaultKeyRef = `host-${id}-cred`;
-        await vaultSet(vaultKeyRef, form.credential.trim());
-      }
 
       const config: HostConfig = {
         id,
@@ -86,9 +140,14 @@ export const HostsSettingsSection: React.FC = () => {
         sshPort: parseInt(form.sshPort, 10) || 22,
         sshUser: form.sshUser.trim(),
         remotePort: parseInt(form.remotePort, 10) || 18080,
-        vaultKeyRef,
+        vaultKeyRef: null,
         sshAuthMethod: form.sshAuthMethod === 'none' ? null : form.sshAuthMethod,
       };
+
+      // Store SSH credential on backend
+      if (form.kind === 'ssh' && form.credential.trim() && form.sshAuthMethod !== 'none') {
+        await api.hosts.storeCredential(id, form.sshAuthMethod, form.credential.trim());
+      }
 
       addHost(config);
       setForm(emptyForm());
@@ -227,7 +286,7 @@ export const HostsSettingsSection: React.FC = () => {
                     type="password"
                     value={form.credential}
                     onChange={(e) => updateForm({ credential: e.target.value })}
-                    placeholder="Stored encrypted in vault"
+                    placeholder="Stored securely on backend"
                   />
                 </div>
               )}
@@ -259,7 +318,7 @@ export const HostsSettingsSection: React.FC = () => {
               onClick={handleSave}
               disabled={saving}
             >
-              {saving ? 'Saving…' : 'Save Host'}
+              {saving ? 'Saving...' : 'Save Host'}
             </button>
             <button
               className="btn btn-ghost btn-xs"
@@ -288,7 +347,7 @@ export const HostsSettingsSection: React.FC = () => {
               <span className="host-row-label">{host.label}</span>
               <span className="host-row-meta">
                 {host.kind === 'direct' ? host.baseUrl : `${host.sshUser}@${host.sshHost}:${host.sshPort} → :${host.remotePort}`}
-                {host.vaultKeyRef && vaultHas(host.vaultKeyRef) && (
+                {host.sshAuthMethod && (
                   <span className="provider-badge" style={{ marginLeft: 4 }}>
                     {host.sshAuthMethod === 'key' ? 'key' : 'password'}
                   </span>
@@ -299,6 +358,7 @@ export const HostsSettingsSection: React.FC = () => {
                   {rt.error}
                 </span>
               )}
+              {status === 'auth_required' && <RemoteAuthPrompt hostId={host.id} />}
             </div>
             <div className="host-row-actions">
               {status === 'connected' ? (
@@ -308,13 +368,20 @@ export const HostsSettingsSection: React.FC = () => {
                 >
                   Disconnect
                 </button>
+              ) : status === 'auth_required' ? (
+                <button
+                  className="btn btn-ghost btn-xs"
+                  onClick={() => disconnectHost(host.id)}
+                >
+                  Cancel
+                </button>
               ) : (
                 <button
                   className="btn btn-primary btn-xs"
                   onClick={() => handleConnect(host.id)}
                   disabled={isConnecting || status === 'connecting'}
                 >
-                  {isConnecting ? 'Connecting…' : 'Connect'}
+                  {isConnecting ? 'Connecting...' : 'Connect'}
                 </button>
               )}
               <button

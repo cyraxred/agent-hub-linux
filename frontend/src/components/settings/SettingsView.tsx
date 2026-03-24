@@ -1,6 +1,7 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useSettingsStore } from '@/store/settings';
 import { useProvidersStore } from '@/store/providers';
+import { useAuthStore } from '@/store/auth';
 import { HostsSettingsSection } from './HostsSettingsSection';
 
 export const SettingsView: React.FC = () => {
@@ -168,6 +169,68 @@ export const SettingsView: React.FC = () => {
         </div>
       </div>
       <HostsSettingsSection />
+      <SecuritySection />
+    </div>
+  );
+};
+
+const SecuritySection: React.FC = () => {
+  const { authenticated, username, logout, invalidateAllTokens } = useAuthStore();
+  const [invalidating, setInvalidating] = useState(false);
+  const [invalidateResult, setInvalidateResult] = useState<string | null>(null);
+
+  if (!authenticated) return null;
+
+  const handleInvalidateAll = async () => {
+    setInvalidating(true);
+    setInvalidateResult(null);
+    try {
+      const count = await invalidateAllTokens();
+      setInvalidateResult(`${count} token(s) invalidated`);
+    } catch (err) {
+      setInvalidateResult((err as Error).message);
+    } finally {
+      setInvalidating(false);
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <h3>Security</h3>
+      <div className="settings-group">
+        <div className="setting-row">
+          <div className="setting-info">
+            <label className="setting-label">Signed in as</label>
+            <span className="setting-description">{username ?? 'unknown'}</span>
+          </div>
+          <button className="btn btn-ghost btn-xs" onClick={logout}>
+            Sign Out
+          </button>
+        </div>
+        <div className="setting-row">
+          <div className="setting-info">
+            <label className="setting-label">Invalidate All Sessions</label>
+            <span className="setting-description">
+              Sign out all connected devices and browsers
+            </span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-sm)' }}>
+            {invalidateResult && (
+              <span style={{ fontSize: 'var(--font-size-xs)', color: 'var(--text-secondary)' }}>
+                {invalidateResult}
+              </span>
+            )}
+            <button
+              className="btn btn-ghost btn-xs"
+              style={{ color: 'var(--accent-red, #ff7b72)' }}
+              onClick={handleInvalidateAll}
+              disabled={invalidating}
+            >
+              {invalidating ? 'Invalidating...' : 'Invalidate All'}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 };

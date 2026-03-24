@@ -1,7 +1,7 @@
 /**
  * Hosts store — persisted list of remote host configurations.
  *
- * Secrets (SSH passwords, PEM keys) are stored in the vault, not here.
+ * SSH credentials are stored in the backend CredentialStore (OS keyring).
  * This store only holds non-sensitive config and runtime connection state.
  */
 
@@ -9,10 +9,14 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { HostConfig } from '@/types/hosts';
 import { LOCALHOST_HOST_ID } from '@/types/hosts';
-import { vaultDelete, vaultGet } from '@/lib/vault';
 import { api } from '@/api/client';
 
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type ConnectionStatus =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'auth_required'
+  | 'error';
 
 export interface HostRuntimeState {
   status: ConnectionStatus;
@@ -31,6 +35,7 @@ interface HostsState {
 
   connectHost: (id: string) => Promise<void>;
   disconnectHost: (id: string) => Promise<void>;
+  authenticateHost: (id: string, username: string, password: string) => Promise<void>;
 
   isConnected: (id: string) => boolean;
   connectedHostIds: () => string[];
@@ -54,15 +59,12 @@ export const useHostsStore = create<HostsState>()(
         })),
 
       removeHost: async (id) => {
-        const host = get().hosts.find((h) => h.id === id);
         // Disconnect first if connected
         if (get().runtimeState[id]?.status === 'connected') {
           await get().disconnectHost(id).catch(() => {});
         }
-        // Delete vault entry
-        if (host?.vaultKeyRef) {
-          vaultDelete(host.vaultKeyRef);
-        }
+        // Delete backend credentials
+        api.hosts.deleteCredential(id).catch(() => {});
         set((s) => {
           const runtimeState = { ...s.runtimeState };
           delete runtimeState[id];
@@ -85,18 +87,8 @@ export const useHostsStore = create<HostsState>()(
         }));
 
         try {
-          // Retrieve credential from vault
-          let sshPassword = '';
-          let sshKey = '';
-          if (host.vaultKeyRef) {
-            const secret = await vaultGet(host.vaultKeyRef);
-            if (secret) {
-              if (host.sshAuthMethod === 'password') sshPassword = secret;
-              else if (host.sshAuthMethod === 'key') sshKey = secret;
-            }
-          }
-
-          await api.hosts.connect({
+          // SSH creds are retrieved by the backend from CredentialStore
+          const resp = await api.hosts.connect({
             id: host.id,
             label: host.label,
             kind: host.kind,
@@ -104,19 +96,52 @@ export const useHostsStore = create<HostsState>()(
             ssh_host: host.sshHost,
             ssh_port: host.sshPort,
             ssh_user: host.sshUser,
-            ssh_password: sshPassword,
-            ssh_key: sshKey,
+            ssh_password: '',
+            ssh_key: '',
             remote_port: host.remotePort,
           });
 
+          if (resp.auth_required) {
+            // Remote requires PAM authentication — UI will show prompt
+            set((s) => ({
+              runtimeState: {
+                ...s.runtimeState,
+                [id]: { status: 'auth_required', error: null },
+              },
+            }));
+          } else {
+            set((s) => ({
+              runtimeState: {
+                ...s.runtimeState,
+                [id]: { status: 'connected', error: null },
+              },
+            }));
+            // Refresh repos so the newly-connected host's sessions appear
+            import('@/store/sessions').then(({ useSessionsStore }) => {
+              useSessionsStore.getState().fetchAllRepositories().catch(() => {});
+            });
+          }
+        } catch (err) {
+          set((s) => ({
+            runtimeState: {
+              ...s.runtimeState,
+              [id]: { status: 'error', error: (err as Error).message },
+            },
+          }));
+          throw err;
+        }
+      },
+
+      authenticateHost: async (id, username, password) => {
+        try {
+          await api.hosts.authenticate(id, username, password);
           set((s) => ({
             runtimeState: {
               ...s.runtimeState,
               [id]: { status: 'connected', error: null },
             },
           }));
-
-          // Refresh repos so the newly-connected host's sessions appear
+          // Refresh repos
           import('@/store/sessions').then(({ useSessionsStore }) => {
             useSessionsStore.getState().fetchAllRepositories().catch(() => {});
           });
@@ -124,7 +149,7 @@ export const useHostsStore = create<HostsState>()(
           set((s) => ({
             runtimeState: {
               ...s.runtimeState,
-              [id]: { status: 'error', error: (err as Error).message },
+              [id]: { status: 'auth_required', error: (err as Error).message },
             },
           }));
           throw err;

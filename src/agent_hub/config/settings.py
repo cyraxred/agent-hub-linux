@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = 18080
 
+    # TLS (required for non-localhost)
+    tls_cert_path: str | None = None
+    tls_key_path: str | None = None
+
     # CLI commands
     cli_command: str = "claude"
     codex_command: str = "codex"
@@ -77,6 +81,16 @@ class Settings(BaseSettings):
     def themes_dir(self) -> Path:
         """Custom themes directory."""
         return Path(self.app_config_dir) / "themes"
+
+    @property
+    def is_localhost(self) -> bool:
+        """Whether the server binds to a loopback address only."""
+        return self.api_host in ("127.0.0.1", "::1", "localhost")
+
+    @property
+    def require_tls(self) -> bool:
+        """TLS is required when not binding to localhost."""
+        return not self.is_localhost
 
     def ensure_dirs(self) -> None:
         """Create application directories if they don't exist."""

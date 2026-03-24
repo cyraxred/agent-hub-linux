@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import String, select
+from sqlalchemy import DateTime, String, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -25,6 +25,20 @@ class SessionMetadataRow(Base):
         default=lambda: datetime.now(tz=timezone.utc),
     )
     updated_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(tz=timezone.utc),
+    )
+
+
+class AuthTokenRow(Base):
+    """Persistent auth token bound to a client IP."""
+
+    __tablename__ = "auth_tokens"
+
+    token: Mapped[str] = mapped_column(String, primary_key=True)
+    username: Mapped[str] = mapped_column(String)
+    client_ip: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
         default=lambda: datetime.now(tz=timezone.utc),
     )
 

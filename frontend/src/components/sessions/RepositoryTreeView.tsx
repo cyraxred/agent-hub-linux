@@ -351,6 +351,7 @@ export const RepositoryTreeView: React.FC<RepositoryTreeViewProps> = ({ filter, 
   const statusDotColor: Record<ConnectionStatus, string> = {
     connected: 'var(--accent-green, #3fb950)',
     connecting: 'var(--accent-yellow, #d29922)',
+    auth_required: 'var(--accent-yellow, #d29922)',
     error: 'var(--accent-red, #ff7b72)',
     disconnected: 'var(--text-tertiary)',
   };

@@ -62,9 +62,15 @@ async function fetchApi<T>(
     ...(options.headers as Record<string, string> | undefined),
   };
 
-  const response = await fetch(url, { ...options, headers });
+  const response = await fetch(url, { ...options, headers, credentials: 'same-origin' });
 
   if (!response.ok) {
+    // On 401 trigger auth re-check so the login page appears
+    if (response.status === 401) {
+      import('@/store/auth').then(({ useAuthStore }) => {
+        useAuthStore.getState().checkAuthStatus();
+      });
+    }
     let body: unknown;
     try {
       body = await response.json();
@@ -236,7 +242,7 @@ interface HostConnectReq {
   ssh_key: string;
   remote_port: number;
 }
-interface HostConnectResp { host_id: string; connected: boolean }
+interface HostConnectResp { host_id: string; connected: boolean; auth_required: boolean }
 interface ConnectedHostsResp { host_ids: string[] }
 
 // ---------------------------------------------------------------------------
@@ -482,5 +488,25 @@ export const api = {
       const r = await get<ConnectedHostsResp>('/hosts/connected');
       return r.host_ids ?? [];
     },
+    storeCredential: (
+      hostId: string,
+      authMethod: 'password' | 'key',
+      credential: string,
+    ): Promise<{ stored: boolean }> =>
+      post(`/hosts/${encodeURIComponent(hostId)}/credential`, {
+        auth_method: authMethod,
+        credential,
+      }),
+    deleteCredential: (hostId: string): Promise<{ deleted: boolean }> =>
+      del(`/hosts/${encodeURIComponent(hostId)}/credential`),
+    authenticate: (
+      hostId: string,
+      username: string,
+      password: string,
+    ): Promise<{ authenticated: boolean }> =>
+      post(`/hosts/${encodeURIComponent(hostId)}/authenticate`, {
+        username,
+        password,
+      }),
   },
 };

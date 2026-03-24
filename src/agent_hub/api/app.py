@@ -46,8 +46,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     register_provider_callbacks(provider)
 
+    protocol = "https" if settings.require_tls else "http"
     logger.info(
-        "AgentHub started — API at http://%s:%s",
+        "AgentHub started — API at %s://%s:%s",
+        protocol,
         settings.api_host,
         settings.api_port,
     )
@@ -69,7 +71,12 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
 
-    # ---- CORS (dev mode) ----
+    # ---- Auth middleware (inner — runs after CORS) ----
+    from agent_hub.api.middleware.auth import AuthMiddleware
+
+    app.add_middleware(AuthMiddleware)
+
+    # ---- CORS (outer — runs first, handles preflight) ----
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -77,6 +84,10 @@ def create_app() -> FastAPI:
             "http://127.0.0.1:5173",
             "http://localhost:18080",
             "http://127.0.0.1:18080",
+            "https://localhost:5173",
+            "https://127.0.0.1:5173",
+            "https://localhost:18080",
+            "https://127.0.0.1:18080",
         ],
         allow_credentials=True,
         allow_methods=["*"],

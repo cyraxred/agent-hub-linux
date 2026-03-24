@@ -26,18 +26,58 @@ def _signal_handler(sig: int, _frame: FrameType | None) -> None:
         _uvicorn_server.should_exit = True
 
 
-def _run_uvicorn(host: str, port: int) -> None:
+def _ensure_tls_certs(settings: Settings) -> tuple[str, str]:
+    """Return (cert_path, key_path), generating a self-signed cert if needed."""
+    from pathlib import Path
+    import subprocess
+
+    if settings.tls_cert_path and settings.tls_key_path:
+        return settings.tls_cert_path, settings.tls_key_path
+
+    cert_dir = Path(settings.app_data_dir) / "tls"
+    cert_dir.mkdir(parents=True, exist_ok=True)
+    cert_path = cert_dir / "server.crt"
+    key_path = cert_dir / "server.key"
+
+    if cert_path.exists() and key_path.exists():
+        return str(cert_path), str(key_path)
+
+    logger.info("Generating self-signed TLS certificate...")
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", str(key_path),
+            "-out", str(cert_path),
+            "-days", "3650",
+            "-nodes",
+            "-subj", f"/CN={settings.api_host}/O=AgentHub",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    logger.info("Self-signed TLS certificate generated at %s", cert_path)
+    return str(cert_path), str(key_path)
+
+
+def _run_uvicorn(settings: Settings) -> None:
     """Run uvicorn in the calling thread (intended for a background thread)."""
     global _uvicorn_server  # noqa: PLW0603
+
+    ssl_kwargs: dict[str, str] = {}
+    if settings.require_tls:
+        cert_path, key_path = _ensure_tls_certs(settings)
+        ssl_kwargs["ssl_certfile"] = cert_path
+        ssl_kwargs["ssl_keyfile"] = key_path
 
     config = uvicorn.Config(
         app="agent_hub.api.app:create_app",
         factory=True,
-        host=host,
-        port=port,
+        host=settings.api_host,
+        port=settings.api_port,
         log_level="info",
         # Disable the access log noise in desktop mode
         access_log=False,
+        **ssl_kwargs,  # type: ignore[arg-type]
     )
     _uvicorn_server = uvicorn.Server(config)
     _uvicorn_server.run()
@@ -71,14 +111,15 @@ def main() -> None:
     # Start uvicorn on a daemon thread so it dies with the main thread
     server_thread = threading.Thread(
         target=_run_uvicorn,
-        args=(host, port),
+        args=(settings,),
         daemon=True,
         name="uvicorn-server",
     )
     server_thread.start()
 
     # Block until the server is ready before opening the window
-    url = f"http://{host}:{port}"
+    protocol = "https" if settings.require_tls else "http"
+    url = f"{protocol}://{host}:{port}"
     if not _wait_for_server(host, port):
         logger.error("Timed out waiting for the API server on %s", url)
         sys.exit(1)
